@@ -1,6 +1,6 @@
 {
   "name": "frontier",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Delegate bounded coding sub-tasks from Claude Code to external frontier models (Qwen, Kimi, DeepSeek, GLM) via OpenRouter, SiliconFlow, DeepInfra or Cerebras.",
   "author": {
     "name": "NightZpy"

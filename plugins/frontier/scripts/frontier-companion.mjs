@@ -1205,10 +1205,10 @@ async function linkCommand() {
     { name: "frontier-keys", rel: "scripts/setup-keys.mjs" },
   ];
   for (const wrapper of wrappers) {
-    // ponytail: latest-by-mtime picks the newest installed plugin version; good
-    // enough because the plugin updater always touches the new version dir last.
+    // Semver-sort the installed version dirs; mtime is unreliable because
+    // running sessions touch old version dirs via .in_use locks.
     const body = isVersionedInstall
-      ? `#!/bin/sh\nDIR="$(ls -td "${versionsRoot}"/*/ 2>/dev/null | head -1)"\nexec node "\${DIR}${wrapper.rel}" "$@"\n`
+      ? `#!/bin/sh\nVER="$(ls "${versionsRoot}" 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"\nexec node "${versionsRoot}/\${VER}/${wrapper.rel}" "$@"\n`
       : `#!/bin/sh\nexec node "${path.join(pluginRoot, wrapper.rel)}" "$@"\n`;
     const dest = path.join(binDir, wrapper.name);
     await fs.writeFile(dest, body, "utf8");
