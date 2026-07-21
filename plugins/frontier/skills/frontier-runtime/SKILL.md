@@ -38,7 +38,7 @@ Command selection:
 Safety rules:
 - Never print or echo API keys (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA_API_KEY`, `CEREBRAS_API_KEY`) or the contents of `~/.claude/frontier/.env`.
 - Never execute `task-worker` — it is internal only.
-- If `setup` reports `ready: false` (surfaced via a `task` error), do not attempt to work around it. Return the error and tell the user to run `/frontier:setup`.
+- If a `task` fails with "no API key configured", do not attempt to work around it. Return the error verbatim — it already names the missing providers and the exact `node .../setup-keys.mjs` command — and tell the user to run that command in their terminal, or to type it in the Claude Code prompt prefixed with `! ` so the interactive key setup runs in-session. `/frontier:setup` shows current key status.
 - Preserve the brief's task text as-is apart from stripping routing flags.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Return the stdout of the `task` command exactly as-is.

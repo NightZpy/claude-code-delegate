@@ -250,7 +250,13 @@ async function executeTaskRequest(job, models, request, tools) {
   }
 
   if (missingKeyCount === selection.providers.length) {
-    throw new Error(`no API key configured for any provider of model ${selection.alias}`);
+    const setupScript = path.join(path.dirname(ENTRYPOINT), "setup-keys.mjs");
+    const wanted = selection.providers.map((p) => p.name).join(", ");
+    throw new Error(
+      `no API key configured for any provider of model ${selection.alias} (needs one of: ${wanted}). ` +
+        `Configure keys by running this in your terminal (or type it prefixed with "! " in Claude Code):\n` +
+        `  node "${setupScript}"`,
+    );
   }
 
   throw new Error(lastError?.message || `all providers failed for model ${selection.alias}`);
