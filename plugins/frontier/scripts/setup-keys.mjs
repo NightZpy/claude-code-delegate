@@ -32,6 +32,26 @@ async function writeEnv(values) {
   await fs.chmod(ENV_FILE, 0o600);
 }
 
+function questionHidden(rl, prompt) {
+  // Unix-password-style input: echo '*' instead of the typed characters.
+  const original = rl._writeToOutput;
+  rl._writeToOutput = function (str) {
+    if (str.includes(prompt)) {
+      original.call(rl, prompt);
+      return;
+    }
+    if (str === "\r\n" || str === "\n") {
+      original.call(rl, str);
+      return;
+    }
+    original.call(rl, "*");
+  };
+  return rl.question(prompt).finally(() => {
+    rl._writeToOutput = original;
+    output.write("\n");
+  });
+}
+
 async function main() {
   const existing = await readEnvFile();
   const rl = readline.createInterface({ input, output });
@@ -44,7 +64,7 @@ async function main() {
     for (const provider of PROVIDER_KEYS) {
       const current = existing[provider.envKey] || "";
       output.write(`${provider.name}: ${current ? `stored ${maskKey(current)}` : "not stored"}\n`);
-      const answer = await rl.question("paste key or press Enter to keep/skip: ");
+      const answer = await questionHidden(rl, "paste key or press Enter to keep/skip: ");
       const trimmed = answer.trim();
       if (trimmed) {
         next[provider.envKey] = trimmed;
