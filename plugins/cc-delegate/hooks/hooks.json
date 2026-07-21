@@ -1,0 +1,16 @@
+{
+  "description": "cc-delegate session hooks",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-hook.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

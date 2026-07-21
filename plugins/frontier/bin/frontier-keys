@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-# Interactive API key setup for the frontier plugin
-DIR="$(cd "$(dirname "$0")" && pwd)"
-exec node "$DIR/../scripts/setup-keys.mjs" "$@"
