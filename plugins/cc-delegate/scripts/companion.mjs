@@ -5,6 +5,7 @@ import process from "node:process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { clipVisible } from "./lib/ansi.mjs";
 import { parseArgs } from "./lib/args.mjs";
 import {
   ENV_FILE,
@@ -556,24 +557,31 @@ function buildTabBar(activeIndex) {
 function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAnalysis, styles) {
   const title = sectionTitle("Analyze", styles);
   const message =
-    "El análisis con IA corre dentro de Claude Code: usa /cc-delegate:analyze — despacha un subagente (Sonnet) con tu usage/details/health y devuelve recomendaciones de costo, salud de providers y dónde ahorrar.";
+    "AI analysis runs inside Claude Code: use /cc-delegate:analyze — it dispatches a subagent (Sonnet) with your usage/details/health and returns cost recommendations, provider health, and where to save.";
 
   const monthKey = currentMonthKey();
   const monthCost = entries
     .filter((entry) => currentMonthKey(new Date(entry.ts)) === monthKey)
     .reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
 
-  const modelCounts = {};
+  // Top model by SPEND, not job count — job counts tie easily and mislead.
+  const modelSpend = {};
   for (const entry of filtered) {
     const model = String(entry.model || "unknown");
-    modelCounts[model] = (modelCounts[model] || 0) + 1;
+    const bucket = (modelSpend[model] ||= { cost: 0, tokens: 0, jobs: 0 });
+    bucket.cost += Number(entry.cost || 0);
+    bucket.tokens += Number(entry.promptTokens || 0) + Number(entry.completionTokens || 0);
+    bucket.jobs += 1;
   }
-  const topModelEntry = Object.entries(modelCounts).sort((left, right) => right[1] - left[1])[0];
+  const topModelEntry = Object.entries(modelSpend).sort(
+    (left, right) =>
+      right[1].cost - left[1].cost || right[1].tokens - left[1].tokens || left[0].localeCompare(right[0]),
+  )[0];
   const topModel = topModelEntry
-    ? `${topModelEntry[0]} (${topModelEntry[1]} job${topModelEntry[1] === 1 ? "" : "s"})`
+    ? `${topModelEntry[0]} (${formatUsd(topModelEntry[1].cost)}, ${topModelEntry[1].jobs} job${topModelEntry[1].jobs === 1 ? "" : "s"})`
     : "-";
 
-  const summaryLines = [`spend this month: ${formatUsd(monthCost)}`, `most used model: ${topModel}`];
+  const summaryLines = [`spend this month: ${formatUsd(monthCost)}`, `top model by spend: ${topModel}`];
   if (warnings.length || activeAdvisories.length) {
     summaryLines.push("active alerts:");
     for (const warning of warnings) {
@@ -590,7 +598,7 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
   const analysisBlock = savedAnalysis
     ? `${styles.bold(`Last analysis — ${formatRelativeTime(savedAnalysis.savedAt)}`)}\n\n${savedAnalysis.content.trimEnd()}`
     : styles.dim("no analysis saved yet");
-  const hint = styles.dim("para correr un análisis nuevo: /cc-delegate:analyze dentro de Claude Code");
+  const hint = styles.dim("to run a new analysis: /cc-delegate:analyze inside Claude Code");
 
   return [title, message, summary, analysisBlock, hint].join("\n\n");
 }
@@ -660,7 +668,7 @@ async function runUsageTui(flags) {
     const styles = usageStyles();
     const tabBar = buildTabBar(activeTab);
     const body = buildUsageTabBody(activeTab, entries, flags, config, styles, models, savedAnalysis);
-    const helpLine = styles.dim("←/→ o 1-5 cambiar vista · r recargar · q salir");
+    const helpLine = styles.dim("←/→ or 1-5 switch view · r reload · q quit");
 
     const rows = stdout.rows || 24;
     const maxBodyLines = Math.max(1, rows - 3); // tab bar + blank line + help line
@@ -673,10 +681,13 @@ async function runUsageTui(flags) {
 
     const outLines = [tabBar, "", ...bodyLines];
     if (truncated) {
-      outLines.push(styles.dim("… (usa la vista estática con --details --limit N para ver todo)"));
+      outLines.push(styles.dim("… (use the static view with --details --limit N to see everything)"));
     }
     outLines.push(helpLine);
-    stdout.write(`\x1b[2J\x1b[H${outLines.join("\n")}`);
+    // Hard-clip every line to the terminal width — a wrapped table row would
+    // desynchronize the fixed-height layout above.
+    const columns = stdout.columns || 100;
+    stdout.write(`\x1b[2J\x1b[H${outLines.map((line) => clipVisible(line, columns)).join("\n")}`);
   }
 
   let resolveExit;
@@ -1187,12 +1198,12 @@ function evaluateContextWindow(models, alias, messages) {
     const suggestions = suggestLargerContextModels(models, alias, promptTokens);
     const suggestionText = suggestions.length
       ? suggestions.map((s) => `${s.alias} ${formatContextSize(s.context)}`).join(", ")
-      : "ninguno en el registro";
+      : "none in the registry";
     return {
       promptTokens,
       ctxPct: pct,
       exceeded: true,
-      failMessage: `prompt ~${formatContextSize(promptTokens)} tokens excede el contexto de ${alias} (${formatContextSize(context)}). Modelos con ventana mayor: ${suggestionText}.`,
+      failMessage: `prompt ~${formatContextSize(promptTokens)} tokens exceeds ${alias}'s context window (${formatContextSize(context)}). Models with larger windows: ${suggestionText}.`,
     };
   }
 
@@ -1201,11 +1212,11 @@ function evaluateContextWindow(models, alias, messages) {
     const suggestions = suggestLargerContextModels(models, alias, promptTokens).slice(0, 2);
     const sameContext = suggestions.length === 2 && suggestions[0].context === suggestions[1].context;
     const suggestionText = !suggestions.length
-      ? "no hay modelo con ventana mayor en el registro"
+      ? "no model with a larger window in the registry"
       : sameContext
-        ? `para contextos así considera ${suggestions.map((s) => s.alias).join("/")} (${formatContextSize(suggestions[0].context)})`
-        : `para contextos así considera ${suggestions.map((s) => `${s.alias} (${formatContextSize(s.context)})`).join(", ")}`;
-    advisoryLine = `⚠ context: ~${formatContextSize(promptTokens)} de ${formatContextSize(context)} (${pct}%) en ${alias} — ${suggestionText}`;
+        ? `for prompts this size consider ${suggestions.map((s) => s.alias).join("/")} (${formatContextSize(suggestions[0].context)})`
+        : `for prompts this size consider ${suggestions.map((s) => `${s.alias} (${formatContextSize(s.context)})`).join(", ")}`;
+    advisoryLine = `⚠ context: ~${formatContextSize(promptTokens)} of ${formatContextSize(context)} (${pct}%) on ${alias} — ${suggestionText}`;
   }
   return { promptTokens, ctxPct: pct, exceeded: false, advisoryLine };
 }
