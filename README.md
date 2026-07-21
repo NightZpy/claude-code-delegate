@@ -65,7 +65,8 @@ Data from research as of July 2026.
 | `/frontier:status` | Check a background job's status | `/frontier:status <jobId>` |
 | `/frontier:result` | Fetch a finished background job's output | `/frontier:result <jobId>` |
 | `/frontier:cancel` | Cancel a running background job | `/frontier:cancel <jobId>` |
-| `/frontier:usage` | Show aggregated token and cost usage across frontier delegations | `/frontier:usage --days 7 --model qwen --session current` |
+| `/frontier:usage` | Show aggregated token and cost usage across frontier delegations (`--details` for per-request rows, `--health` for per-model/provider reliability) | `/frontier:usage --days 7 --model qwen --session current` |
+| `/frontier:analyze` | Feed usage/details/health JSON to a subagent for cost and health recommendations | `/frontier:analyze --days 7` |
 | `/frontier:setup` | Check readiness (keys present, providers reachable) | `/frontier:setup` |
 
 ## How it works
@@ -82,6 +83,8 @@ frontier-companion.mjs status
 frontier-companion.mjs result
 frontier-companion.mjs cancel
 frontier-companion.mjs usage [--days N] [--model qwen|kimi|deepseek|glm|grok] [--session <id|current>] [--json]
+frontier-companion.mjs usage --details [--model X] [--provider Y] [--limit N] [--days N] [--session <id|current>] [--json]
+frontier-companion.mjs usage --health [--days N] [--session <id|current>] [--json]
 ```
 
 - **Background jobs** run as a detached process, with state persisted to disk so `status`/`result`/`cancel` can be called from a later, unrelated Claude Code turn.
@@ -92,7 +95,15 @@ frontier-companion.mjs usage [--days N] [--model qwen|kimi|deepseek|glm|grok] [-
 - **Session breakdown**: usage is also grouped per Claude Code session via a `SessionStart` hook that stores `FRONTIER_SESSION_ID` in Claude's env file for later task processes.
 - **State**: job state and the `.env` key file live under `~/.claude/frontier/`, outside the plugin and outside any project repo.
 
+### Monitoring
+
+Every provider attempt — successful or not — is tracked with `latencyMs`, `attempts` (how many providers were actually called), and `failedProviders` (which ones errored before the winning one, if any; missing-key skips don't count). Jobs that fail after exhausting every configured provider are logged too, with `status: "failed"`, `tokens: 0`, `cost: 0`. `/frontier:usage --details` lists individual requests newest-first (time, job, model, provider, tokens, cost, latency, status); `/frontier:usage --health` aggregates success rate, average/p95 latency, fallback rate, and average cost per model and per provider, printing a `⚠` line when a model or provider looks unhealthy (success rate under 80% over 5+ requests, p95 latency over 60s, or fallback rate over 30%). `/frontier:analyze` runs all three (`usage`, `--details`, `--health`) as JSON and hands them to a subagent for a plain-language cost/health readout with concrete next actions.
+
 v1 is text-in/text-out: the external model has no tools and returns code or patches as text, which Claude then applies and verifies. There is no agentic loop in this version.
+
+### Spend quotas & alerts
+
+`frontier-keys` prompts for an optional monthly USD quota per provider (default $10 for OpenRouter, $5 for the others; "0" or "none" disables it), stored in `~/.claude/frontier/config.json`. After every completed task, the runtime sums that provider's `usage.jsonl` cost for the current calendar month and compares it to the quota: 80%+ prints a `⚠` warning, 100%+ a `🔴` critical alert. Quotas are **never enforced** — delegations keep working regardless of spend; the alert is purely informational, surfaced wherever the result is: prepended to foreground `task` output, stored on the job (so `/frontier:result` shows it for background jobs too), in `/frontier:usage`'s quota bars, and next to the key hint in `/frontier:setup`. `--json` variants expose the same data as a `quota: {monthlyUsd, spentThisMonth, pct, level}` field.
 
 ## Using with plan-big-execute-small
 
@@ -112,13 +123,16 @@ claude-code-delegate/
         frontier-runner.md          # thin forwarder subagent
       commands/
         task.md, qwen.md, kimi.md, deepseek.md, glm.md, grok.md
-        status.md, result.md, cancel.md, usage.md, setup.md
+        status.md, result.md, cancel.md, usage.md, analyze.md, setup.md
       hooks/
         hooks.json                  # SessionStart hook to persist Claude session id
       scripts/
         frontier-companion.mjs      # runtime: task, status, result, cancel, usage, setup, models
         session-hook.mjs            # writes FRONTIER_SESSION_ID into Claude env file
         setup-keys.mjs              # interactive key setup
+        lib/providerGuide.mjs       # provider price/verdict guide shared by setup-keys and `models --guide`
+        lib/config.mjs              # ~/.claude/frontier/config.json (quotas) load/save
+        lib/quota.mjs               # quota status + alert-line formatting, shared by usage/setup/task
       skills/
         frontier-runtime/
           SKILL.md                  # internal call contract for frontier-runner

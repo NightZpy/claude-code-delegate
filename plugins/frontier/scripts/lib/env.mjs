@@ -6,6 +6,17 @@ export const FRONTIER_HOME = path.join(os.homedir(), ".claude", "frontier");
 export const ENV_FILE = path.join(FRONTIER_HOME, ".env");
 export const USAGE_LEDGER_FILE = path.join(FRONTIER_HOME, "usage.jsonl");
 
+export function maskKey(value) {
+  if (!value) {
+    return "not set";
+  }
+  const key = String(value);
+  if (key.length <= 14) {
+    return `****${key.slice(-4)}`;
+  }
+  return `${key.slice(0, 8)}…${key.slice(-4)}`;
+}
+
 function parseEnv(text) {
   const values = {};
 

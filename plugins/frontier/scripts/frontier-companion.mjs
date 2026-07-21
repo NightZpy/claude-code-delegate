@@ -5,9 +5,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "./lib/args.mjs";
-import { ENV_FILE, USAGE_LEDGER_FILE, loadKeys } from "./lib/env.mjs";
+import { ENV_FILE, USAGE_LEDGER_FILE, loadKeys, maskKey } from "./lib/env.mjs";
+import { loadConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import { PROVIDERS, callProvider } from "./lib/providers.mjs";
+import { renderProviderGuide } from "./lib/providerGuide.mjs";
+import { buildQuotaSection, computeQuotaStatus, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import {
   appendJobLog,
   createJob,
@@ -58,19 +61,6 @@ function computeCost(pricing = {}, usage = {}) {
   return Number((promptCost + completionCost).toFixed(6));
 }
 
-function padCell(value, width, align = "left") {
-  const text = String(value);
-  return align === "right" ? text.padStart(width) : text.padEnd(width);
-}
-
-function formatUsd(value) {
-  return Number(value || 0).toFixed(6);
-}
-
-function formatInteger(value) {
-  return Math.round(Number(value || 0)).toLocaleString("en-US");
-}
-
 function formatSessionLabel(value) {
   if (value === null || value === undefined || value === "") {
     return "(no session)";
@@ -79,23 +69,72 @@ function formatSessionLabel(value) {
   return text.length > 8 ? `${text.slice(0, 8)}…` : text;
 }
 
-function printAlignedTable(headers, rows) {
-  const widths = headers.map((header, index) =>
-    Math.max(
-      header.label.length,
-      ...rows.map((row) => String(row[index] ?? "").length),
-    ),
-  );
-  const lines = [
-    headers.map((header, index) => padCell(header.label, widths[index], header.align)).join("  "),
-    headers.map((_, index) => "-".repeat(widths[index])).join("  "),
-    ...rows.map((row) =>
-      headers
-        .map((header, index) => padCell(row[index] ?? "", widths[index], header.align))
-        .join("  "),
-    ),
-  ];
-  return lines.join("\n");
+function formatCompactNumber(value) {
+  const number = Number(value || 0);
+  if (Math.abs(number) >= 1000000) {
+    return `${(number / 1000000).toFixed(1)}M`;
+  }
+  if (Math.abs(number) >= 1000) {
+    return `${(number / 1000).toFixed(1)}k`;
+  }
+  return String(Math.round(number));
+}
+
+function formatUsd(value) {
+  const number = Number(value || 0);
+  if (number === 0) {
+    return "$0";
+  }
+  const rounded = number.toFixed(6);
+  if (Number(rounded) === 0) {
+    return "$0.000001";
+  }
+  return `$${rounded.replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+
+function formatRelativeTime(timestamp) {
+  const elapsedMs = Math.max(0, Date.now() - Date.parse(timestamp));
+  const seconds = Math.floor(elapsedMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function usageStyles() {
+  if (!process.stdout.isTTY) {
+    return { dim: (text) => text, cyan: (text) => text, red: (text) => text, yellow: (text) => text };
+  }
+  return {
+    dim: (text) => `\x1b[2m${text}\x1b[0m`,
+    cyan: (text) => `\x1b[36m${text}\x1b[0m`,
+    red: (text) => `\x1b[31m${text}\x1b[0m`,
+    yellow: (text) => `\x1b[33m${text}\x1b[0m`,
+  };
+}
+
+function formatJobIdShort(id) {
+  if (!id) {
+    return "-";
+  }
+  const text = String(id);
+  return text.length > 16 ? `${text.slice(0, 16)}…` : text;
+}
+
+function formatUsageRow(name, stats, totalCost, styles, nameWidth) {
+  const cost = Number(stats.cost || 0);
+  const share = totalCost > 0 ? (cost / totalCost) * 100 : 0;
+  const barWidth = cost > 0 ? Math.max(1, Math.round((share / 100) * 20)) : 0;
+  const jobs = `${stats.jobs} job${stats.jobs === 1 ? "" : "s"}`;
+  return `  ${name.padEnd(nameWidth)} ${styles.cyan("█".repeat(barWidth).padEnd(20))} ${share.toFixed(0).padStart(3)}%  ${jobs.padEnd(6)}  ${formatCompactNumber(stats.promptTokens)} in / ${formatCompactNumber(stats.completionTokens)} out   ${formatUsd(cost)}`;
+}
+
+function formatUsageRows(buckets, totalCost, styles, formatName = (name) => name) {
+  const rows = sortUsageBuckets(buckets).map(([name, stats]) => [formatName(name), stats]);
+  const nameWidth = Math.max(12, ...rows.map(([name]) => name.length));
+  return rows.map(([name, stats]) => formatUsageRow(name, stats, totalCost, styles, nameWidth));
 }
 
 async function readUsageLedger() {
@@ -121,7 +160,7 @@ async function readUsageLedger() {
   }
 }
 
-function aggregateUsage(entries) {
+function aggregateUsage(entries, roundCost = true) {
   const totals = {
     jobs: 0,
     promptTokens: 0,
@@ -163,15 +202,17 @@ function aggregateUsage(entries) {
     }
   }
 
-  totals.cost = Number(totals.cost.toFixed(6));
-  for (const bucket of Object.values(byModel)) {
-    bucket.cost = Number(bucket.cost.toFixed(6));
-  }
-  for (const bucket of Object.values(byProvider)) {
-    bucket.cost = Number(bucket.cost.toFixed(6));
-  }
-  for (const bucket of Object.values(bySession)) {
-    bucket.cost = Number(bucket.cost.toFixed(6));
+  if (roundCost) {
+    totals.cost = Number(totals.cost.toFixed(6));
+    for (const bucket of Object.values(byModel)) {
+      bucket.cost = Number(bucket.cost.toFixed(6));
+    }
+    for (const bucket of Object.values(byProvider)) {
+      bucket.cost = Number(bucket.cost.toFixed(6));
+    }
+    for (const bucket of Object.values(bySession)) {
+      bucket.cost = Number(bucket.cost.toFixed(6));
+    }
   }
 
   return { totals, byModel, byProvider, bySession };
@@ -187,9 +228,9 @@ function sortUsageBuckets(buckets) {
   });
 }
 
-async function usageCommand(flags) {
-  const entries = await readUsageLedger();
+function resolveLedgerFilter(entries, flags) {
   const modelFilter = typeof flags.model === "string" ? flags.model : null;
+  const providerFilter = typeof flags.provider === "string" ? flags.provider : null;
   const sessionFilterRaw = flags.session;
   const days = flags.days !== undefined ? Number(flags.days) : null;
   const since =
@@ -201,8 +242,7 @@ async function usageCommand(flags) {
   if (sessionFilterRaw !== undefined) {
     if (sessionFilterRaw === true || sessionFilterRaw === "current") {
       if (!process.env.FRONTIER_SESSION_ID) {
-        process.stdout.write("no current session id (FRONTIER_SESSION_ID not set)\n");
-        return;
+        return { sessionError: "no current session id (FRONTIER_SESSION_ID not set)" };
       }
       sessionFilter = process.env.FRONTIER_SESSION_ID;
     } else if (sessionFilterRaw === null) {
@@ -214,6 +254,9 @@ async function usageCommand(flags) {
 
   const filtered = entries.filter((entry) => {
     if (modelFilter && entry.model !== modelFilter) {
+      return false;
+    }
+    if (providerFilter && entry.provider !== providerFilter) {
       return false;
     }
     if (sessionFilter) {
@@ -228,84 +271,361 @@ async function usageCommand(flags) {
     return true;
   });
 
+  return { filtered, since, sessionFilter, days, sessionError: null };
+}
+
+function normalizeLedgerEntry(entry) {
+  return {
+    ...entry,
+    attempts: entry.attempts === undefined ? 1 : Number(entry.attempts),
+    failedProviders: Array.isArray(entry.failedProviders) ? entry.failedProviders : [],
+    latencyMs: entry.latencyMs ?? null,
+  };
+}
+
+function formatLatency(ms) {
+  if (ms === null || ms === undefined) {
+    return "-";
+  }
+  const number = Number(ms);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  return number >= 1000 ? `${(number / 1000).toFixed(1)}s` : `${Math.round(number)}ms`;
+}
+
+function formatPercent(value) {
+  return `${Math.round(value)}%`;
+}
+
+function average(values) {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function percentile(values, fraction) {
+  if (!values.length) {
+    return null;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(fraction * sorted.length) - 1));
+  return sorted[index];
+}
+
+function renderTable(headers, rows, colorRow) {
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => String(row.cells[index]).length)),
+  );
+  const pad = (cells) => cells.map((cell, index) => String(cell).padEnd(widths[index]));
+  const lines = [pad(headers).join("  ")];
+  for (const row of rows) {
+    const padded = pad(row.cells);
+    lines.push((colorRow ? colorRow(padded, row) : padded).join("  "));
+  }
+  return lines.join("\n");
+}
+
+async function usageCommand(flags) {
+  if (flags.details) {
+    await usageDetailsCommand(flags);
+    return;
+  }
+  if (flags.health) {
+    await usageHealthCommand(flags);
+    return;
+  }
+
+  const entries = await readUsageLedger();
+  const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
+  if (sessionError) {
+    process.stdout.write(`${sessionError}\n`);
+    return;
+  }
+
   const payload = {
     ...aggregateUsage(filtered),
     since: since ? since.toISOString() : null,
   };
 
+  const config = await loadConfig();
+
   if (flags.json) {
+    for (const [provider, monthlyUsd] of Object.entries(config.quotas)) {
+      const quota = computeQuotaStatus(provider, monthlyUsd, entries);
+      if (!quota) {
+        continue;
+      }
+      if (!payload.byProvider[provider]) {
+        payload.byProvider[provider] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+      }
+      payload.byProvider[provider].quota = quota;
+    }
     printJson(payload);
     return;
   }
 
+  const styles = usageStyles();
+  const quotaSection = buildQuotaSection(config, entries, styles);
+
   if (!filtered.length) {
+    if (!quotaSection) {
+      process.stdout.write("no usage recorded yet\n");
+      return;
+    }
+    const emptySections = [`Quotas (this month)\n${quotaSection.rows.join("\n")}`];
+    if (quotaSection.alerts.length) {
+      emptySections.push(quotaSection.alerts.join("\n"));
+    }
+    process.stdout.write(`${emptySections.join("\n\n")}\n`);
+    return;
+  }
+
+  const displayUsage = aggregateUsage(filtered, false);
+  const newestTimestamp = filtered.reduce((newest, entry) =>
+    !newest || Date.parse(entry.ts) > Date.parse(newest) ? entry.ts : newest,
+  null);
+  const scope = sessionFilter
+    ? `session ${formatSessionLabel(sessionFilter)}`
+    : since
+      ? `last ${days} days`
+      : "all time";
+  const summaryValues = [
+    ["jobs", String(displayUsage.totals.jobs)],
+    ["tokens in", formatCompactNumber(displayUsage.totals.promptTokens)],
+    ["tokens out", formatCompactNumber(displayUsage.totals.completionTokens)],
+    ["total cost USD", formatUsd(displayUsage.totals.cost)],
+    ["avg cost per job", formatUsd(displayUsage.totals.cost / displayUsage.totals.jobs)],
+    ["last activity", newestTimestamp ? formatRelativeTime(newestTimestamp) : "unknown"],
+  ];
+  const labelWidth = Math.max(...summaryValues.map(([label]) => label.length));
+  const summary = summaryValues.map(([label, value]) =>
+    `  ${styles.dim(`${label}:`.padEnd(labelWidth + 1))} ${value}`,
+  );
+  const totalCost = Number(displayUsage.totals.cost || 0);
+  const modelRows = formatUsageRows(displayUsage.byModel, totalCost, styles);
+  const providerRows = formatUsageRows(displayUsage.byProvider, totalCost, styles);
+  const sessionRows = formatUsageRows(displayUsage.bySession, totalCost, styles, (name) => {
+    const sessionId = name === "null" ? null : name;
+    const current = sessionId && sessionId === process.env.FRONTIER_SESSION_ID ? " (current)" : "";
+    return `${formatSessionLabel(sessionId)}${current}`;
+  });
+
+  const sections = [
+    `Frontier usage — ${scope}`,
+    summary.join("\n"),
+    `By model\n${modelRows.join("\n")}`,
+    `By provider\n${providerRows.join("\n")}`,
+    `By session\n${sessionRows.join("\n")}`,
+  ];
+  if (quotaSection) {
+    sections.push(`Quotas (this month)\n${quotaSection.rows.join("\n")}`);
+  }
+  if (quotaSection?.alerts.length) {
+    sections.push(quotaSection.alerts.join("\n"));
+  }
+  process.stdout.write(`${sections.join("\n\n")}\n`);
+}
+
+async function usageDetailsCommand(flags) {
+  const entries = await readUsageLedger();
+  const { filtered, sessionError } = resolveLedgerFilter(entries, flags);
+  if (sessionError) {
+    process.stdout.write(`${sessionError}\n`);
+    return;
+  }
+
+  const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
+  const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+  const limited = sorted.slice(0, Math.max(0, limit));
+
+  if (flags.json) {
+    printJson(limited);
+    return;
+  }
+
+  if (!limited.length) {
     process.stdout.write("no usage recorded yet\n");
     return;
   }
 
-  const summary = [
-    "Summary",
-    `jobs: ${formatInteger(payload.totals.jobs)}`,
-    `prompt tokens: ${formatInteger(payload.totals.promptTokens)}`,
-    `completion tokens: ${formatInteger(payload.totals.completionTokens)}`,
-    `total cost USD: ${formatUsd(payload.totals.cost)}`,
+  const styles = usageStyles();
+  const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "STATUS"];
+  const rows = limited.map((raw) => {
+    const entry = normalizeLedgerEntry(raw);
+    const failed = entry.status !== "completed";
+    return {
+      cells: [
+        formatRelativeTime(entry.ts),
+        formatJobIdShort(entry.jobId),
+        String(entry.model || "-"),
+        String(entry.provider || "-"),
+        formatCompactNumber(entry.promptTokens),
+        formatCompactNumber(entry.completionTokens),
+        formatUsd(entry.cost),
+        formatLatency(entry.latencyMs),
+        failed ? "failed" : "completed",
+      ],
+      failed,
+    };
+  });
+
+  const table = renderTable(headers, rows, (cells, row) => {
+    if (!row.failed) {
+      return cells;
+    }
+    const dimmed = cells.map((cell) => styles.dim(cell));
+    dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
+    return dimmed;
+  });
+
+  process.stdout.write(`${table}\n`);
+}
+
+function computeGroupStats(entries, names, keyOf) {
+  return names.map((name) => {
+    const group = entries.filter((entry) => keyOf(entry) === name);
+    const reqs = group.length;
+    const successes = group.filter((entry) => entry.status === "completed");
+    const successPct = reqs ? (successes.length / reqs) * 100 : 0;
+    const latencies = successes.map((entry) => entry.latencyMs).filter((value) => value !== null && value !== undefined);
+    const fallbackCount = group.filter((entry) => entry.failedProviders.length > 0).length;
+    const totalCost = group.reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
+    const errorTimestamps = group
+      .filter((entry) => entry.status === "failed" || entry.failedProviders.length > 0)
+      .map((entry) => entry.ts);
+
+    return {
+      name,
+      reqs,
+      successPct,
+      avgLatencyMs: latencies.length ? average(latencies) : null,
+      p95LatencyMs: latencies.length ? percentile(latencies, 0.95) : null,
+      fallbackPct: reqs ? (fallbackCount / reqs) * 100 : 0,
+      avgCostPerReq: reqs ? totalCost / reqs : null,
+      lastError: errorTimestamps.length
+        ? errorTimestamps.reduce((latest, ts) => (Date.parse(ts) > Date.parse(latest) ? ts : latest))
+        : null,
+    };
+  });
+}
+
+function computeProviderStats(entries, providerNames) {
+  return providerNames.map((name) => {
+    const involved = entries.filter(
+      (entry) => (entry.status === "completed" && entry.provider === name) || entry.failedProviders.includes(name),
+    );
+    const successes = involved.filter((entry) => entry.status === "completed" && entry.provider === name);
+    const fallbackHits = involved.filter((entry) => entry.failedProviders.includes(name));
+    const reqs = involved.length;
+    const latencies = successes.map((entry) => entry.latencyMs).filter((value) => value !== null && value !== undefined);
+    const totalCost = successes.reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
+
+    return {
+      name,
+      reqs,
+      successPct: reqs ? (successes.length / reqs) * 100 : 0,
+      avgLatencyMs: latencies.length ? average(latencies) : null,
+      p95LatencyMs: latencies.length ? percentile(latencies, 0.95) : null,
+      fallbackPct: reqs ? (fallbackHits.length / reqs) * 100 : 0,
+      avgCostPerReq: reqs ? totalCost / reqs : null,
+      lastError: fallbackHits.length
+        ? fallbackHits.map((entry) => entry.ts).reduce((latest, ts) => (Date.parse(ts) > Date.parse(latest) ? ts : latest))
+        : null,
+    };
+  });
+}
+
+function buildHealthWarnings(rows, adviceSuffix) {
+  const warnings = [];
+  for (const row of rows) {
+    if (row.reqs >= 5 && row.successPct < 80) {
+      warnings.push(`⚠ ${row.name}: success ${Math.round(row.successPct)}% over ${row.reqs} reqs — ${adviceSuffix}`);
+    }
+    if (row.p95LatencyMs !== null && row.p95LatencyMs > 60000) {
+      warnings.push(`⚠ ${row.name}: p95 latency ${formatLatency(row.p95LatencyMs)} over ${row.reqs} reqs — ${adviceSuffix}`);
+    }
+    if (row.fallbackPct > 30) {
+      warnings.push(`⚠ ${row.name}: fallback rate ${Math.round(row.fallbackPct)}% over ${row.reqs} reqs — ${adviceSuffix}`);
+    }
+  }
+  return warnings;
+}
+
+function healthRowToJson(row) {
+  return {
+    name: row.name,
+    reqs: row.reqs,
+    successPct: Number(row.successPct.toFixed(1)),
+    avgLatencyMs: row.avgLatencyMs === null ? null : Math.round(row.avgLatencyMs),
+    p95LatencyMs: row.p95LatencyMs === null ? null : Math.round(row.p95LatencyMs),
+    fallbackPct: Number(row.fallbackPct.toFixed(1)),
+    avgCostPerReq: row.avgCostPerReq === null ? null : Number(row.avgCostPerReq.toFixed(6)),
+    lastError: row.lastError,
+  };
+}
+
+function healthRowCells(row) {
+  return [
+    row.name,
+    String(row.reqs),
+    formatPercent(row.successPct),
+    formatLatency(row.avgLatencyMs),
+    formatLatency(row.p95LatencyMs),
+    formatPercent(row.fallbackPct),
+    row.avgCostPerReq === null ? "-" : formatUsd(row.avgCostPerReq),
+    row.lastError ? formatRelativeTime(row.lastError) : "-",
+  ];
+}
+
+async function usageHealthCommand(flags) {
+  const entries = await readUsageLedger();
+  const { filtered, sessionError } = resolveLedgerFilter(entries, flags);
+  if (sessionError) {
+    process.stdout.write(`${sessionError}\n`);
+    return;
+  }
+
+  const normalized = filtered.map(normalizeLedgerEntry);
+  const modelNames = [...new Set(normalized.map((entry) => String(entry.model || "unknown")))].sort();
+  const providerNamesFromLedger = new Set();
+  for (const entry of normalized) {
+    if (entry.status === "completed" && entry.provider) {
+      providerNamesFromLedger.add(entry.provider);
+    }
+    for (const failedProvider of entry.failedProviders) {
+      providerNamesFromLedger.add(failedProvider);
+    }
+  }
+  const providerNames = [...providerNamesFromLedger].sort();
+
+  const modelStats = computeGroupStats(normalized, modelNames, (entry) => String(entry.model || "unknown"));
+  const providerStats = computeProviderStats(normalized, providerNames);
+  const warnings = [
+    ...buildHealthWarnings(modelStats, "investigate before relying on it further"),
+    ...buildHealthWarnings(providerStats, "consider demoting it in models.json"),
   ];
 
-  const modelRows = sortUsageBuckets(payload.byModel).map(([name, stats]) => [
-    name,
-    formatInteger(stats.jobs),
-    formatInteger(stats.promptTokens),
-    formatInteger(stats.completionTokens),
-    formatUsd(stats.cost),
-  ]);
-  const providerRows = sortUsageBuckets(payload.byProvider).map(([name, stats]) => [
-    name,
-    formatInteger(stats.jobs),
-    formatInteger(stats.promptTokens),
-    formatInteger(stats.completionTokens),
-    formatUsd(stats.cost),
-  ]);
-  const sessionRows = sortUsageBuckets(payload.bySession).map(([name, stats]) => [
-    formatSessionLabel(name === "null" ? null : name),
-    formatInteger(stats.jobs),
-    formatInteger(stats.promptTokens),
-    formatInteger(stats.completionTokens),
-    formatUsd(stats.cost),
-  ]);
+  if (flags.json) {
+    printJson({
+      models: modelStats.map(healthRowToJson),
+      providers: providerStats.map(healthRowToJson),
+      warnings,
+    });
+    return;
+  }
 
-  const sections = [
-    summary.join("\n"),
-    `By model\n${printAlignedTable(
-      [
-        { label: "MODEL", align: "left" },
-        { label: "JOBS", align: "right" },
-        { label: "PROMPT TOKENS", align: "right" },
-        { label: "COMPLETION TOKENS", align: "right" },
-        { label: "COST USD", align: "right" },
-      ],
-      modelRows,
-    )}`,
-    `By provider\n${printAlignedTable(
-      [
-        { label: "PROVIDER", align: "left" },
-        { label: "JOBS", align: "right" },
-        { label: "PROMPT TOKENS", align: "right" },
-        { label: "COMPLETION TOKENS", align: "right" },
-        { label: "COST USD", align: "right" },
-      ],
-      providerRows,
-    )}`,
-    `By session\n${printAlignedTable(
-      [
-        { label: "SESSION", align: "left" },
-        { label: "JOBS", align: "right" },
-        { label: "PROMPT TOKENS", align: "right" },
-        { label: "COMPLETION TOKENS", align: "right" },
-        { label: "COST USD", align: "right" },
-      ],
-      sessionRows,
-    )}`,
-  ];
+  if (!normalized.length) {
+    process.stdout.write("no usage recorded yet\n");
+    return;
+  }
+
+  const headers = ["NAME", "REQS", "SUCCESS%", "AVG LATENCY", "P95 LATENCY", "FALLBACK%", "AVG COST/REQ", "LAST ERROR"];
+  const modelTable = renderTable(headers, modelStats.map((row) => ({ cells: healthRowCells(row) })));
+  const providerTable = renderTable(headers, providerStats.map((row) => ({ cells: healthRowCells(row) })));
+
+  const sections = [`By model\n${modelTable}`, `By provider\n${providerTable}`];
+  if (warnings.length) {
+    sections.push(warnings.join("\n"));
+  }
   process.stdout.write(`${sections.join("\n\n")}\n`);
 }
 
@@ -462,15 +782,17 @@ async function executeTaskRequest(job, models, request, tools) {
     }
 
     try {
+      const callStartedAt = Date.now();
       const response = await callProvider(candidate.name, candidate.id, messages, {
         maxTokens: request.maxTokens,
       });
+      const latencyMs = Date.now() - callStartedAt;
       const usage = normalizeUsage(response.usage);
       const content =
         response.choices?.[0]?.message?.content ??
         response.choices?.[0]?.text ??
         "";
-      const cost = computeCost(selection.pricing, usage);
+      const cost = computeCost(candidate.pricing || selection.pricing, usage);
       attempt.outcome = "success";
       attempt.finishedAt = new Date().toISOString();
       await tools.setJob({
@@ -482,6 +804,7 @@ async function executeTaskRequest(job, models, request, tools) {
         attempts,
         usage,
         cost,
+        latencyMs,
         result: {
           content,
           raw: response,
@@ -590,12 +913,34 @@ async function setupCommand(flags) {
     ready: Object.values(keys.values).some(Boolean),
     envFile: ENV_FILE,
     providers: {
-      openrouter: { keyPresent: Boolean(keys.values.OPENROUTER_API_KEY) },
-      siliconflow: { keyPresent: Boolean(keys.values.SILICONFLOW_API_KEY) },
-      deepinfra: { keyPresent: Boolean(keys.values.DEEPINFRA_API_KEY) },
-      cerebras: { keyPresent: Boolean(keys.values.CEREBRAS_API_KEY) },
+      openrouter: {
+        keyPresent: Boolean(keys.values.OPENROUTER_API_KEY),
+        keyHint: keys.values.OPENROUTER_API_KEY ? maskKey(keys.values.OPENROUTER_API_KEY) : null,
+      },
+      siliconflow: {
+        keyPresent: Boolean(keys.values.SILICONFLOW_API_KEY),
+        keyHint: keys.values.SILICONFLOW_API_KEY ? maskKey(keys.values.SILICONFLOW_API_KEY) : null,
+      },
+      deepinfra: {
+        keyPresent: Boolean(keys.values.DEEPINFRA_API_KEY),
+        keyHint: keys.values.DEEPINFRA_API_KEY ? maskKey(keys.values.DEEPINFRA_API_KEY) : null,
+      },
+      cerebras: {
+        keyPresent: Boolean(keys.values.CEREBRAS_API_KEY),
+        keyHint: keys.values.CEREBRAS_API_KEY ? maskKey(keys.values.CEREBRAS_API_KEY) : null,
+      },
     },
   };
+
+  const config = await loadConfig();
+  const entries = await readUsageLedger();
+  for (const [provider, data] of Object.entries(payload.providers)) {
+    const monthlyUsd = config.quotas[provider];
+    if (monthlyUsd === undefined) {
+      continue;
+    }
+    data.quota = computeQuotaStatus(provider, monthlyUsd, entries);
+  }
 
   if (flags.json) {
     printJson(payload);
@@ -608,13 +953,24 @@ async function setupCommand(flags) {
     `env file: ${payload.envFile}`,
   ];
   for (const [provider, data] of Object.entries(payload.providers)) {
-    lines.push(`${provider}: ${data.keyPresent ? "key present" : "missing"}`);
+    let line = `${provider}: ${data.keyHint || "missing"}`;
+    if (data.quota) {
+      const icon = data.quota.level === "critical" ? " 🔴" : data.quota.level === "warning" ? " ⚠" : "";
+      line += ` — quota ${formatUsd2(data.quota.monthlyUsd)}/mo, ${formatUsd2(data.quota.spentThisMonth)} spent (${Math.round(data.quota.pct)}%)${icon}`;
+    }
+    lines.push(line);
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
 async function modelsCommand(flags) {
   const models = await readModelsRegistry();
+
+  if (flags.guide) {
+    process.stdout.write(`${renderProviderGuide(models)}\n`);
+    return;
+  }
+
   const payload = Object.entries(models).map(([alias, model]) => ({
     alias,
     label: model.label,
@@ -655,13 +1011,45 @@ async function createTaskJob(cwd, flags, positionals) {
   return job;
 }
 
+// Non-blocking: quota alerts never fail or delay the task, they're just recorded
+// on the job (log + a `quota`/`quotaAlert` field) so foreground and background
+// callers can both surface them.
+async function attachQuotaAlert(cwd, job) {
+  // Non-blocking by contract: any failure here must never turn a completed
+  // (and already billed) task into an apparent failure.
+  try {
+    if (job.status !== "completed" || !job.provider) {
+      return job;
+    }
+    const config = await loadConfig();
+    const monthlyUsd = config.quotas[job.provider];
+    if (monthlyUsd === undefined) {
+      return job;
+    }
+    const entries = await readUsageLedger();
+    const quota = computeQuotaStatus(job.provider, monthlyUsd, entries);
+    if (!quota) {
+      return job;
+    }
+    const patch = { quota };
+    if (quota.level !== "ok") {
+      patch.quotaAlert = [formatQuotaAlertLine(job.provider, quota)];
+      await appendJobLog(cwd, job.id, patch.quotaAlert[0]);
+    }
+    return await updateJob(cwd, job.id, patch);
+  } catch {
+    return job;
+  }
+}
+
 async function runTask(cwd, job) {
   await loadKeys();
   const models = await readModelsRegistry();
-  return runTrackedJob(cwd, job.id, async (tools) => {
+  const completed = await runTrackedJob(cwd, job.id, async (tools) => {
     const outcome = await executeTaskRequest(job, models, job.request, tools);
     return outcome;
   });
+  return attachQuotaAlert(cwd, completed);
 }
 
 async function taskCommand(cwd, flags, positionals) {
@@ -682,7 +1070,8 @@ async function taskCommand(cwd, flags, positionals) {
   if (flags.json) {
     printJson(completed);
   } else if (completed.status === "completed") {
-    process.stdout.write(`${completed.result?.content || ""}\n`);
+    const alertPrefix = completed.quotaAlert?.length ? `${completed.quotaAlert.join("\n")}\n\n` : "";
+    process.stdout.write(`${alertPrefix}${completed.result?.content || ""}\n`);
   } else {
     process.stderr.write(`${jobErrorMessage(completed)}\n`);
   }
@@ -747,6 +1136,7 @@ async function resultCommand(cwd, flags, positionals) {
     cost: job.cost,
     error: job.error,
     output: job.result?.content || null,
+    quota: job.quota || null,
   };
 
   if (flags.json) {
@@ -754,12 +1144,14 @@ async function resultCommand(cwd, flags, positionals) {
     return;
   }
 
+  const alertPrefix = job.quotaAlert?.length ? `${job.quotaAlert.join("\n")}\n\n` : "";
+
   if (payload.output) {
-    process.stdout.write(`${payload.output}\n`);
+    process.stdout.write(`${alertPrefix}${payload.output}\n`);
     return;
   }
 
-  process.stdout.write(`${payload.error || "no output stored"}\n`);
+  process.stdout.write(`${alertPrefix}${payload.error || "no output stored"}\n`);
 }
 
 async function cancelCommand(cwd, positionals) {

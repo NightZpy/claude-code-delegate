@@ -14,7 +14,21 @@ function errorMessage(error) {
 async function appendUsageLedger(job) {
   const promptTokens = Number(job?.usage?.prompt_tokens || 0);
   const completionTokens = Number(job?.usage?.completion_tokens || 0);
-  if (!promptTokens && !completionTokens) {
+  const isCompleted = job.status === "completed";
+  const attemptsList = Array.isArray(job?.attempts) ? job.attempts : [];
+  const failedProviders = attemptsList
+    .filter((attempt) => attempt.outcome === "error")
+    .map((attempt) => attempt.provider);
+  const attempts = attemptsList.filter(
+    (attempt) => attempt.outcome === "error" || attempt.outcome === "success",
+  ).length;
+
+  if (isCompleted) {
+    if (!promptTokens && !completionTokens) {
+      return;
+    }
+  } else if (!failedProviders.length) {
+    // every provider was skipped for a missing key — that's config, not a health signal.
     return;
   }
 
@@ -29,7 +43,10 @@ async function appendUsageLedger(job) {
     promptTokens,
     completionTokens,
     cost: Number(job.cost || 0),
-    status: job.status === "completed" ? "completed" : "failed",
+    status: isCompleted ? "completed" : "failed",
+    latencyMs: isCompleted ? (job.latencyMs ?? null) : null,
+    attempts: attempts || 1,
+    failedProviders,
   };
 
   try {

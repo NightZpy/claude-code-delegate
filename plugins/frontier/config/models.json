@@ -29,7 +29,11 @@
         },
         {
           "name": "siliconflow",
-          "id": "moonshotai/Kimi-K3"
+          "id": "moonshotai/Kimi-K3",
+          "pricing": {
+            "input": 3.0,
+            "output": 15.0
+          }
         }
       ],
       "context": 1000000,
@@ -49,7 +53,11 @@
         },
         {
           "name": "siliconflow",
-          "id": "deepseek-ai/DeepSeek-V4-Flash"
+          "id": "deepseek-ai/DeepSeek-V4-Flash",
+          "pricing": {
+            "input": 0.13,
+            "output": 0.28
+          }
         },
         {
           "name": "deepinfra",
@@ -89,7 +97,11 @@
         },
         {
           "name": "siliconflow",
-          "id": "zai-org/GLM-5.2"
+          "id": "zai-org/GLM-5.2",
+          "pricing": {
+            "input": 1.302,
+            "output": 4.092
+          }
         }
       ],
       "context": 1048576,
