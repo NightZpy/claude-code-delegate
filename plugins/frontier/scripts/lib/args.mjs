@@ -2,7 +2,7 @@ import path from "node:path";
 
 // Flags that never take a value; without this list, `task --background "prompt"`
 // would swallow the prompt as the flag's value.
-const BOOLEAN_FLAGS = new Set(["background", "diff", "json", "all", "details", "health", "guide"]);
+const BOOLEAN_FLAGS = new Set(["background", "diff", "json", "all", "details", "health", "guide", "static"]);
 
 function coerceValue(value) {
   if (value === "true") {

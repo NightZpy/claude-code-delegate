@@ -32,7 +32,8 @@
           "id": "moonshotai/Kimi-K3",
           "pricing": {
             "input": 3.0,
-            "output": 15.0
+            "output": 15.0,
+            "cachedInput": 0.3
           }
         }
       ],
@@ -56,7 +57,8 @@
           "id": "deepseek-ai/DeepSeek-V4-Flash",
           "pricing": {
             "input": 0.13,
-            "output": 0.28
+            "output": 0.28,
+            "cachedInput": 0.028
           }
         },
         {
@@ -100,7 +102,8 @@
           "id": "zai-org/GLM-5.2",
           "pricing": {
             "input": 1.302,
-            "output": 4.092
+            "output": 4.092,
+            "cachedInput": 0.26
           }
         }
       ],
@@ -112,5 +115,9 @@
       "tier": "agentic-refactor",
       "notes": "Best independently verified of the fleet (SWE-bench Pro 62.1%, #1 open-weight). Multi-step refactors, tool-use style output (~Sonnet 5 tier). SiliconFlow ID verified ($1.302/$4.092, pricier than OR)."
     }
+  },
+  "_pricingSources": {
+    "siliconflow": "https://www.siliconflow.com/pricing (verified 2026-07-21)",
+    "openrouter": "per-model endpoint pages (verified 2026-07-21)"
   }
 }

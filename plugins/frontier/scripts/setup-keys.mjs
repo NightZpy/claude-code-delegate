@@ -7,6 +7,8 @@ import { stdin as input, stdout as output } from "node:process";
 import { ENV_FILE, maskKey, readEnvFile } from "./lib/env.mjs";
 import { loadConfig, saveConfig } from "./lib/config.mjs";
 import { renderProviderGuide } from "./lib/providerGuide.mjs";
+import { terminalStyles } from "./lib/styles.mjs";
+import { padVisible } from "./lib/ansi.mjs";
 
 const PROVIDER_KEYS = [
   { name: "openrouter", envKey: "OPENROUTER_API_KEY", defaultQuota: 10 },
@@ -55,8 +57,9 @@ async function loadModelsRegistry() {
 }
 
 async function main() {
+  const styles = terminalStyles(output);
   const models = await loadModelsRegistry();
-  output.write(`${renderProviderGuide(models)}\n\n`);
+  output.write(`${renderProviderGuide(models, styles, output.columns || 100)}\n\n`);
 
   const existing = await readEnvFile();
   const rl = readline.createInterface({ input, output });
@@ -66,13 +69,15 @@ async function main() {
     output.write(`Writing keys to ${ENV_FILE}\n`);
     output.write(`Home: ${os.homedir()}\n\n`);
 
-    for (const provider of PROVIDER_KEYS) {
+    for (const [index, provider] of PROVIDER_KEYS.entries()) {
       const current = existing[provider.envKey] || "";
-      output.write(`${provider.name}: ${current ? `stored ${maskKey(current)}` : "not stored"}\n`);
-      const answer = await questionHidden(rl, "paste key or press Enter to keep/skip: ");
+      output.write(`${styles.bold(`[${index + 1}/${PROVIDER_KEYS.length}] ${provider.name}`)}\n`);
+      output.write(`  ${current ? styles.green(`stored ${maskKey(current)}`) : styles.dim("not stored")}\n`);
+      const answer = await questionHidden(rl, "  paste key or press Enter to keep/skip: ");
       const trimmed = answer.trim();
       if (trimmed) {
         next[provider.envKey] = trimmed;
+        output.write(`  ${styles.green("✓ saved")}\n`);
       }
       output.write("\n");
     }
@@ -86,16 +91,17 @@ async function main() {
   const configuredProviders = PROVIDER_KEYS.filter((provider) => next[provider.envKey]);
 
   if (configuredProviders.length) {
-    output.write("Monthly spend quotas (USD, optional)\n");
+    output.write(`${styles.bold("Monthly spend quotas (USD, optional)")}\n`);
     const rl2 = readline.createInterface({ input, output });
     try {
-      for (const provider of configuredProviders) {
+      for (const [index, provider] of configuredProviders.entries()) {
         const current = config.quotas[provider.name];
+        output.write(`${styles.bold(`[${index + 1}/${configuredProviders.length}] ${provider.name}`)}\n`);
         output.write(
-          `${provider.name}: ${current !== undefined ? `current $${current}` : `not set (default $${provider.defaultQuota})`}\n`,
+          `  ${current !== undefined ? `current $${current}` : styles.dim(`not set (default $${provider.defaultQuota})`)}\n`,
         );
         const answer = await rl2.question(
-          `monthly spend quota USD [default ${provider.defaultQuota} for openrouter, 5 others; current value if already set — Enter keeps it, "0" or "none" disables]: `,
+          `  monthly quota USD [Enter keeps current/default, "0" or "none" disables]: `,
         );
         const trimmed = answer.trim().toLowerCase();
         if (trimmed === "") {
@@ -108,7 +114,7 @@ async function main() {
             config.quotas[provider.name] = parsed;
           }
         }
-        output.write("\n");
+        output.write(`  ${styles.green("✓ saved")}\n\n`);
       }
     } finally {
       rl2.close();
@@ -116,14 +122,19 @@ async function main() {
     await saveConfig(config);
   }
 
+  const nameWidth = Math.max(...PROVIDER_KEYS.map((provider) => provider.name.length));
   const summary = PROVIDER_KEYS.map((provider) => {
     const value = next[provider.envKey] || "";
     const quota = config.quotas[provider.name];
-    const quotaSuffix = value && quota !== undefined ? ` — quota $${quota}/mo` : value ? " — quota disabled" : "";
-    return `${provider.name.padEnd(12)} ${value ? `configured ${maskKey(value)}` : "not configured"}${quotaSuffix}`;
+    const keyMark = value ? styles.green("✓") : styles.dim("–");
+    const quotaMark = value && quota !== undefined ? styles.green("✓") : styles.dim("–");
+    const keyCol = value ? `key ${keyMark} ${maskKey(value)}` : `key ${keyMark} not configured`;
+    const quotaCol =
+      value && quota !== undefined ? `quota ${quotaMark} $${quota}/mo` : `quota ${quotaMark} disabled`;
+    return `  ${provider.name.padEnd(nameWidth)}  ${padVisible(keyCol, 28)}  ${quotaCol}`;
   });
 
-  output.write("Configured providers\n");
+  output.write(`${styles.bold("Configured providers")}\n`);
   output.write(`${summary.join("\n")}\n`);
 }
 

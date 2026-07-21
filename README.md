@@ -86,10 +86,12 @@ frontier-companion.mjs task [--background] [--model qwen|kimi|deepseek|glm|grok]
 frontier-companion.mjs status
 frontier-companion.mjs result
 frontier-companion.mjs cancel
-frontier-companion.mjs usage [--days N] [--model qwen|kimi|deepseek|glm|grok] [--session <id|current>] [--json]
+frontier-companion.mjs usage [--static] [--days N] [--model qwen|kimi|deepseek|glm|grok] [--session <id|current>] [--json]
 frontier-companion.mjs usage --details [--model X] [--provider Y] [--limit N] [--days N] [--session <id|current>] [--json]
 frontier-companion.mjs usage --health [--days N] [--session <id|current>] [--json]
 ```
+
+Run `frontier usage` with no flags in a terminal and it opens an interactive tabbed viewer (Overview / Details / Health / Quotas) instead of printing static text: `←`/`→` or `1`-`4` switch tabs, `r` reloads the ledger from disk, `q`/Esc/Ctrl-C exits. Navigation is keyboard-only, no mouse support. Any view flag (`--details`, `--health`, `--json`) or `--static` forces the plain scriptable output instead — that's what `/frontier:usage` uses (it runs over a pipe, which is never a TTY, so it's always static regardless of flags).
 
 - **Background jobs** run as a detached process, with state persisted to disk so `status`/`result`/`cancel` can be called from a later, unrelated Claude Code turn.
 - **Context inlining**: `--file` and `--diff` read local content and fold it into the prompt sent to the external model — the model itself has no filesystem or tool access.
@@ -137,6 +139,8 @@ claude-code-delegate/
         lib/providerGuide.mjs       # provider price/verdict guide shared by setup-keys and `models --guide`
         lib/config.mjs              # ~/.claude/frontier/config.json (quotas) load/save
         lib/quota.mjs               # quota status + alert-line formatting, shared by usage/setup/task
+        lib/styles.mjs              # TTY-aware color/emphasis helpers shared across usage/setup-keys/guide
+        lib/ansi.mjs                # ANSI-aware string width helpers (word-wrap, column padding)
       skills/
         frontier-runtime/
           SKILL.md                  # internal call contract for frontier-runner

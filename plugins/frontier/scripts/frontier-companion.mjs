@@ -12,6 +12,7 @@ import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import { PROVIDERS, callProvider } from "./lib/providers.mjs";
 import { renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
+import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
 import {
   appendJobLog,
   createJob,
@@ -105,15 +106,22 @@ function formatRelativeTime(timestamp) {
 }
 
 function usageStyles() {
-  if (!process.stdout.isTTY) {
-    return { dim: (text) => text, cyan: (text) => text, red: (text) => text, yellow: (text) => text };
-  }
-  return {
-    dim: (text) => `\x1b[2m${text}\x1b[0m`,
-    cyan: (text) => `\x1b[36m${text}\x1b[0m`,
-    red: (text) => `\x1b[31m${text}\x1b[0m`,
-    yellow: (text) => `\x1b[33m${text}\x1b[0m`,
-  };
+  return terminalStyles(process.stdout);
+}
+
+// Semantic color for "higher is better" percentages (e.g. success rate).
+function colorByPercent(text, value, styles) {
+  if (value >= 95) return styles.green(text);
+  if (value >= 80) return styles.yellow(text);
+  return styles.red(text);
+}
+
+// Semantic color for p95 latency: fine under 10s, warning under 30s, red above.
+function colorByP95Latency(text, ms, styles) {
+  if (ms === null || ms === undefined) return text;
+  if (ms > 30000) return styles.red(text);
+  if (ms > 10000) return styles.yellow(text);
+  return text;
 }
 
 function formatJobIdShort(id) {
@@ -312,12 +320,34 @@ function percentile(values, fraction) {
   return sorted[index];
 }
 
-function renderTable(headers, rows, colorRow) {
+// Width-aware: shrinks the last column (with a "…" truncation marker) so the
+// row fits `maxWidth`. Headers are never truncated below their own label —
+// callers should pass short header abbreviations for narrow terminals.
+function renderTable(headers, rows, styles, colorRow, maxWidth = process.stdout.columns || 100) {
   const widths = headers.map((header, index) =>
     Math.max(header.length, ...rows.map((row) => String(row.cells[index]).length)),
   );
-  const pad = (cells) => cells.map((cell, index) => String(cell).padEnd(widths[index]));
-  const lines = [pad(headers).join("  ")];
+  const lastIndex = widths.length - 1;
+  const fixedWidth = widths.slice(0, -1).reduce((sum, width) => sum + width, 0) + 2 * lastIndex;
+  const availableForLast = Math.max(headers[lastIndex].length, maxWidth - fixedWidth);
+  widths[lastIndex] = Math.min(widths[lastIndex], availableForLast);
+
+  const pad = (cells) =>
+    cells.map((cell, index) => {
+      const text = String(cell);
+      const width = widths[index];
+      if (text.length <= width) {
+        return text.padEnd(width);
+      }
+      if (index !== lastIndex) {
+        return text.padEnd(width);
+      }
+      return width <= 1 ? text.slice(0, width) : `${text.slice(0, width - 1)}…`;
+    });
+
+  const headerLine = pad(headers).join("  ");
+  const separatorLine = styles.dim("─".repeat(headerLine.length));
+  const lines = [headerLine, separatorLine];
   for (const row of rows) {
     const padded = pad(row.cells);
     lines.push((colorRow ? colorRow(padded, row) : padded).join("  "));
@@ -325,59 +355,21 @@ function renderTable(headers, rows, colorRow) {
   return lines.join("\n");
 }
 
-async function usageCommand(flags) {
-  if (flags.details) {
-    await usageDetailsCommand(flags);
-    return;
-  }
-  if (flags.health) {
-    await usageHealthCommand(flags);
-    return;
-  }
-
-  const entries = await readUsageLedger();
-  const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
-  if (sessionError) {
-    process.stdout.write(`${sessionError}\n`);
-    return;
-  }
-
-  const payload = {
-    ...aggregateUsage(filtered),
-    since: since ? since.toISOString() : null,
-  };
-
-  const config = await loadConfig();
-
-  if (flags.json) {
-    for (const [provider, monthlyUsd] of Object.entries(config.quotas)) {
-      const quota = computeQuotaStatus(provider, monthlyUsd, entries);
-      if (!quota) {
-        continue;
-      }
-      if (!payload.byProvider[provider]) {
-        payload.byProvider[provider] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
-      }
-      payload.byProvider[provider].quota = quota;
-    }
-    printJson(payload);
-    return;
-  }
-
-  const styles = usageStyles();
-  const quotaSection = buildQuotaSection(config, entries, styles);
+// Builds the human-readable Overview body (no trailing newline). `filtered`/
+// `filterInfo` come from resolveLedgerFilter; `quotaSection` from
+// buildQuotaSection (or null when no quotas are configured).
+function buildOverviewView(filtered, filterInfo, styles, quotaSection) {
+  const { since, sessionFilter, days } = filterInfo;
 
   if (!filtered.length) {
     if (!quotaSection) {
-      process.stdout.write("no usage recorded yet\n");
-      return;
+      return "no usage recorded yet";
     }
-    const emptySections = [`Quotas (this month)\n${quotaSection.rows.join("\n")}`];
+    const emptySections = [`${sectionTitle("Quotas (this month)", styles)}\n${quotaSection.rows.join("\n")}`];
     if (quotaSection.alerts.length) {
       emptySections.push(quotaSection.alerts.join("\n"));
     }
-    process.stdout.write(`${emptySections.join("\n\n")}\n`);
-    return;
+    return emptySections.join("\n\n");
   }
 
   const displayUsage = aggregateUsage(filtered, false);
@@ -411,14 +403,14 @@ async function usageCommand(flags) {
   });
 
   const sections = [
-    `Frontier usage — ${scope}`,
+    sectionTitle(`Frontier usage — ${scope}`, styles),
     summary.join("\n"),
-    `By model\n${modelRows.join("\n")}`,
-    `By provider\n${providerRows.join("\n")}`,
-    `By session\n${sessionRows.join("\n")}`,
+    `${sectionTitle("By model", styles)}\n${modelRows.join("\n")}`,
+    `${sectionTitle("By provider", styles)}\n${providerRows.join("\n")}`,
+    `${sectionTitle("By session", styles)}\n${sessionRows.join("\n")}`,
   ];
   if (quotaSection) {
-    sections.push(`Quotas (this month)\n${quotaSection.rows.join("\n")}`);
+    sections.push(`${sectionTitle("Quotas (this month)", styles)}\n${quotaSection.rows.join("\n")}`);
   }
   if (quotaSection?.alerts.length) {
     sections.push(quotaSection.alerts.join("\n"));
@@ -428,32 +420,15 @@ async function usageCommand(flags) {
       "views: usage --details · usage --health   filters: --days N · --model <alias> · --provider <name> · --session current",
     ),
   );
-  process.stdout.write(`${sections.join("\n\n")}\n`);
+  return sections.join("\n\n");
 }
 
-async function usageDetailsCommand(flags) {
-  const entries = await readUsageLedger();
-  const { filtered, sessionError } = resolveLedgerFilter(entries, flags);
-  if (sessionError) {
-    process.stdout.write(`${sessionError}\n`);
-    return;
-  }
-
-  const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
-  const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
-  const limited = sorted.slice(0, Math.max(0, limit));
-
-  if (flags.json) {
-    printJson(limited);
-    return;
-  }
-
+// Builds the human-readable Details body (no trailing newline).
+function buildDetailsView(limited, styles) {
   if (!limited.length) {
-    process.stdout.write("no usage recorded yet\n");
-    return;
+    return "no usage recorded yet";
   }
 
-  const styles = usageStyles();
   const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "STATUS"];
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
@@ -474,7 +449,7 @@ async function usageDetailsCommand(flags) {
     };
   });
 
-  const table = renderTable(headers, rows, (cells, row) => {
+  return renderTable(headers, rows, styles, (cells, row) => {
     if (!row.failed) {
       return cells;
     }
@@ -482,8 +457,327 @@ async function usageDetailsCommand(flags) {
     dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
     return dimmed;
   });
+}
 
-  process.stdout.write(`${table}\n`);
+// Builds the human-readable Health body (no trailing newline).
+function buildHealthView(normalized, modelStats, providerStats, warnings, styles) {
+  if (!normalized.length) {
+    return "no usage recorded yet";
+  }
+
+  const headers = ["NAME", "REQS", "OK%", "AVG", "P95", "FBACK", "$/REQ", "LAST ERR"];
+  const toRows = (statRows) => statRows.map((row) => ({ cells: healthRowCells(row), raw: row }));
+  const colorRow = (cells, row) => {
+    const colored = [...cells];
+    colored[2] = colorByPercent(cells[2], row.raw.successPct, styles);
+    colored[4] = colorByP95Latency(cells[4], row.raw.p95LatencyMs, styles);
+    return colored;
+  };
+  const modelTable = renderTable(headers, toRows(modelStats), styles, colorRow);
+  const providerTable = renderTable(headers, toRows(providerStats), styles, colorRow);
+
+  const sections = [
+    `${sectionTitle("By model", styles)}\n${modelTable}`,
+    `${sectionTitle("By provider", styles)}\n${providerTable}`,
+  ];
+  if (warnings.length) {
+    sections.push(warnings.map((warning) => styles.yellow(warning)).join("\n"));
+  }
+  return sections.join("\n\n");
+}
+
+// Builds the human-readable Quotas body (no trailing newline). Used by the
+// TUI's Quotas tab; the static `usage` overview embeds the same section.
+function buildQuotasView(config, entries, styles) {
+  const quotaSection = buildQuotaSection(config, entries, styles);
+  if (!quotaSection) {
+    return [
+      "no quotas configured — run frontier-keys to set monthly quotas",
+      styles.dim("Set a monthly USD quota per provider: run `frontier-keys` and answer the quota prompt."),
+    ].join("\n\n");
+  }
+  const sections = [`${sectionTitle("Quotas (this month)", styles)}\n${quotaSection.rows.join("\n")}`];
+  if (quotaSection.alerts.length) {
+    sections.push(quotaSection.alerts.join("\n"));
+  }
+  return sections.join("\n\n");
+}
+
+const USAGE_TABS = ["Overview", "Details", "Health", "Quotas"];
+
+function buildTabBar(activeIndex) {
+  return USAGE_TABS.map((name, index) => (index === activeIndex ? `\x1b[7m ${name} \x1b[0m` : ` ${name} `)).join(
+    "│",
+  );
+}
+
+function buildUsageTabBody(tabIndex, entries, flags, config, styles) {
+  const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
+
+  if (tabIndex === 3) {
+    return buildQuotasView(config, entries, styles);
+  }
+  if (sessionError) {
+    return sessionError;
+  }
+  if (tabIndex === 0) {
+    const quotaSection = buildQuotaSection(config, entries, styles);
+    return buildOverviewView(filtered, { since, sessionFilter, days }, styles, quotaSection);
+  }
+  if (tabIndex === 1) {
+    const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
+    const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    const limited = sorted.slice(0, Math.max(0, limit));
+    return buildDetailsView(limited, styles);
+  }
+
+  const normalized = filtered.map(normalizeLedgerEntry);
+  const modelNames = [...new Set(normalized.map((entry) => String(entry.model || "unknown")))].sort();
+  const providerNamesFromLedger = new Set();
+  for (const entry of normalized) {
+    if (entry.status === "completed" && entry.provider) {
+      providerNamesFromLedger.add(entry.provider);
+    }
+    for (const failedProvider of entry.failedProviders) {
+      providerNamesFromLedger.add(failedProvider);
+    }
+  }
+  const providerNames = [...providerNamesFromLedger].sort();
+  const modelStats = computeGroupStats(normalized, modelNames, (entry) => String(entry.model || "unknown"));
+  const providerStats = computeProviderStats(normalized, providerNames);
+  const warnings = [
+    ...buildHealthWarnings(modelStats, "investigate before relying on it further"),
+    ...buildHealthWarnings(providerStats, "consider demoting it in models.json"),
+  ];
+  return buildHealthView(normalized, modelStats, providerStats, warnings, styles);
+}
+
+// Interactive tabbed usage viewer. Entered only when stdout/stdin are both
+// TTYs and no view flag (--details/--health/--json) or --static was passed.
+// ponytail: no scroll — content taller than the terminal is truncated with a
+// hint to use the static --details/--limit view instead of building a pager.
+async function runUsageTui(flags) {
+  const stdout = process.stdout;
+  const stdin = process.stdin;
+  const config = await loadConfig();
+  let entries = await readUsageLedger();
+  let activeTab = 0;
+  const wasRaw = Boolean(stdin.isRaw);
+  let lastError = null;
+
+  function render() {
+    const styles = usageStyles();
+    const tabBar = buildTabBar(activeTab);
+    const body = buildUsageTabBody(activeTab, entries, flags, config, styles);
+    const helpLine = styles.dim("←/→ o 1-4 cambiar vista · r recargar · q salir");
+
+    const rows = stdout.rows || 24;
+    const maxBodyLines = Math.max(1, rows - 3); // tab bar + blank line + help line
+    let bodyLines = body.split("\n");
+    let truncated = false;
+    if (bodyLines.length > maxBodyLines) {
+      bodyLines = bodyLines.slice(0, Math.max(0, maxBodyLines - 1));
+      truncated = true;
+    }
+
+    const outLines = [tabBar, "", ...bodyLines];
+    if (truncated) {
+      outLines.push(styles.dim("… (usa la vista estática con --details --limit N para ver todo)"));
+    }
+    outLines.push(helpLine);
+    stdout.write(`\x1b[2J\x1b[H${outLines.join("\n")}`);
+  }
+
+  let resolveExit;
+  const exitPromise = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
+  let exiting = false;
+  function requestExit() {
+    if (exiting) return;
+    exiting = true;
+    resolveExit();
+  }
+
+  // A raw PTY can deliver an escape sequence split across several `data`
+  // events (observed: byte-by-byte under `script`). Buffer input and, on a
+  // lone trailing ESC, wait briefly for the rest of the sequence before
+  // treating it as a standalone Escape keypress.
+  let pending = "";
+  let escTimer = null;
+
+  function clearEscTimer() {
+    if (escTimer) {
+      clearTimeout(escTimer);
+      escTimer = null;
+    }
+  }
+
+  async function drainPending() {
+    let acted = false;
+    while (pending.length) {
+      const ch = pending[0];
+      if (ch === "\x1b") {
+        if (pending.length === 1) {
+          clearEscTimer();
+          escTimer = setTimeout(() => {
+            escTimer = null;
+            if (pending === "\x1b") {
+              pending = "";
+              requestExit();
+            }
+          }, 50);
+          break;
+        }
+        if (pending[1] !== "[") {
+          pending = pending.slice(1);
+          if (acted) render();
+          requestExit();
+          return;
+        }
+        if (pending.length < 3) {
+          break;
+        }
+        const dir = pending[2];
+        pending = pending.slice(3);
+        if (dir === "C") {
+          activeTab = (activeTab + 1) % USAGE_TABS.length;
+          acted = true;
+        } else if (dir === "D") {
+          activeTab = (activeTab + USAGE_TABS.length - 1) % USAGE_TABS.length;
+          acted = true;
+        }
+        continue;
+      }
+
+      pending = pending.slice(1);
+      if (ch === "q" || ch === "\x03") {
+        if (acted) render();
+        requestExit();
+        return;
+      }
+      if (ch === "\t") {
+        activeTab = (activeTab + 1) % USAGE_TABS.length;
+        acted = true;
+      } else if (ch >= "1" && ch <= "4") {
+        activeTab = Number(ch) - 1;
+        acted = true;
+      } else if (ch === "r") {
+        entries = await readUsageLedger();
+        acted = true;
+      }
+    }
+    if (acted && !exiting) {
+      render();
+    }
+  }
+
+  async function onData(chunk) {
+    try {
+      pending += String(chunk);
+      await drainPending();
+    } catch (error) {
+      lastError = error;
+      requestExit();
+    }
+  }
+
+  function onSigint() {
+    requestExit();
+  }
+
+  stdout.write("\x1b[?1049h\x1b[?25l");
+  stdin.setEncoding("utf8");
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.on("data", onData);
+  process.on("SIGINT", onSigint);
+
+  try {
+    render();
+    await exitPromise;
+  } finally {
+    clearEscTimer();
+    stdin.removeListener("data", onData);
+    process.removeListener("SIGINT", onSigint);
+    stdin.setRawMode(wasRaw);
+    stdin.pause();
+    stdout.write("\x1b[?25h\x1b[?1049l");
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+}
+
+async function usageCommand(flags) {
+  if (flags.details) {
+    await usageDetailsCommand(flags);
+    return;
+  }
+  if (flags.health) {
+    await usageHealthCommand(flags);
+    return;
+  }
+
+  const entries = await readUsageLedger();
+  const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
+  if (sessionError) {
+    process.stdout.write(`${sessionError}\n`);
+    return;
+  }
+
+  const config = await loadConfig();
+
+  if (flags.json) {
+    const payload = {
+      ...aggregateUsage(filtered),
+      since: since ? since.toISOString() : null,
+    };
+    for (const [provider, monthlyUsd] of Object.entries(config.quotas)) {
+      const quota = computeQuotaStatus(provider, monthlyUsd, entries);
+      if (!quota) {
+        continue;
+      }
+      if (!payload.byProvider[provider]) {
+        payload.byProvider[provider] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+      }
+      payload.byProvider[provider].quota = quota;
+    }
+    printJson(payload);
+    return;
+  }
+
+  if (!flags.static && process.stdout.isTTY && process.stdin.isTTY) {
+    await runUsageTui(flags);
+    return;
+  }
+
+  const styles = usageStyles();
+  const quotaSection = buildQuotaSection(config, entries, styles);
+  const view = buildOverviewView(filtered, { since, sessionFilter, days }, styles, quotaSection);
+  process.stdout.write(`${view}\n`);
+}
+
+async function usageDetailsCommand(flags) {
+  const entries = await readUsageLedger();
+  const { filtered, sessionError } = resolveLedgerFilter(entries, flags);
+  if (sessionError) {
+    process.stdout.write(`${sessionError}\n`);
+    return;
+  }
+
+  const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
+  const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+  const limited = sorted.slice(0, Math.max(0, limit));
+
+  if (flags.json) {
+    printJson(limited);
+    return;
+  }
+
+  const styles = usageStyles();
+  process.stdout.write(`${buildDetailsView(limited, styles)}\n`);
 }
 
 function computeGroupStats(entries, names, keyOf) {
@@ -619,20 +913,8 @@ async function usageHealthCommand(flags) {
     return;
   }
 
-  if (!normalized.length) {
-    process.stdout.write("no usage recorded yet\n");
-    return;
-  }
-
-  const headers = ["NAME", "REQS", "SUCCESS%", "AVG LATENCY", "P95 LATENCY", "FALLBACK%", "AVG COST/REQ", "LAST ERROR"];
-  const modelTable = renderTable(headers, modelStats.map((row) => ({ cells: healthRowCells(row) })));
-  const providerTable = renderTable(headers, providerStats.map((row) => ({ cells: healthRowCells(row) })));
-
-  const sections = [`By model\n${modelTable}`, `By provider\n${providerTable}`];
-  if (warnings.length) {
-    sections.push(warnings.join("\n"));
-  }
-  process.stdout.write(`${sections.join("\n\n")}\n`);
+  const styles = usageStyles();
+  process.stdout.write(`${buildHealthView(normalized, modelStats, providerStats, warnings, styles)}\n`);
 }
 
 async function readModelsRegistry() {
@@ -973,7 +1255,8 @@ async function modelsCommand(flags) {
   const models = await readModelsRegistry();
 
   if (flags.guide) {
-    process.stdout.write(`${renderProviderGuide(models)}\n`);
+    const styles = usageStyles();
+    process.stdout.write(`${renderProviderGuide(models, styles, process.stdout.columns || 100)}\n`);
     return;
   }
 
