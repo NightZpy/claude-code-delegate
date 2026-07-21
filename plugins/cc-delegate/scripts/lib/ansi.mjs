@@ -48,29 +48,3 @@ export function clipVisible(text, width) {
   }
   return hasAnsi ? `${result}…\x1b[0m` : `${result}…`;
 }
-
-// Hard-clip a (possibly colored) line to `width` visible chars, appending "…"
-// and a reset so a clipped color never bleeds into the next line. Guarantees
-// no terminal wrap regardless of how wide a table renders.
-export function clipVisible(text, width) {
-  const str = String(text);
-  if (visibleLength(str) <= width) {
-    return str;
-  }
-  const budget = Math.max(0, width - 1);
-  let out = "";
-  let visible = 0;
-  let index = 0;
-  while (index < str.length && visible < budget) {
-    const match = /^\x1b\[[0-9;]*m/.exec(str.slice(index));
-    if (match) {
-      out += match[0];
-      index += match[0].length;
-      continue;
-    }
-    out += str[index];
-    index += 1;
-    visible += 1;
-  }
-  return `${out}\x1b[0m…`;
-}
