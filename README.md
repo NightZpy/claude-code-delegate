@@ -52,6 +52,10 @@ Data from research as of July 2026.
 
 **Benchmark caveat:** most of the vendor-reported SWE-bench figures above 75% for these models are self-reported and not confirmed on neutral leaderboards. The only independently verified numbers here are GLM-5.2's SWE-bench Pro result and DeepSeek V3.2-Exp's aider result.
 
+### CLI from any terminal
+
+Run `frontier link` once (inside a Claude Code session: `! frontier link`) to install `frontier` and `frontier-keys` wrappers into `~/.local/bin`, so both commands work from any terminal. The wrappers always resolve the latest installed plugin version.
+
 ## Commands
 
 | Command | Description | Example |

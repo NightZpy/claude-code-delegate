@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { execFile } from "node:child_process";
@@ -422,6 +423,11 @@ async function usageCommand(flags) {
   if (quotaSection?.alerts.length) {
     sections.push(quotaSection.alerts.join("\n"));
   }
+  sections.push(
+    styles.dim(
+      "views: usage --details · usage --health   filters: --days N · --model <alias> · --provider <name> · --session current",
+    ),
+  );
   process.stdout.write(`${sections.join("\n\n")}\n`);
 }
 
@@ -1186,11 +1192,43 @@ async function cancelCommand(cwd, positionals) {
   process.stdout.write(`${cancelled.id}\n`);
 }
 
+async function linkCommand() {
+  const scriptsDir = path.dirname(ENTRYPOINT);
+  const pluginRoot = path.dirname(scriptsDir);
+  const versionsRoot = path.dirname(pluginRoot);
+  const isVersionedInstall = /^\d+\.\d+\.\d+$/.test(path.basename(pluginRoot));
+  const binDir = path.join(os.homedir(), ".local", "bin");
+  await fs.mkdir(binDir, { recursive: true });
+
+  const wrappers = [
+    { name: "frontier", rel: "scripts/frontier-companion.mjs" },
+    { name: "frontier-keys", rel: "scripts/setup-keys.mjs" },
+  ];
+  for (const wrapper of wrappers) {
+    // ponytail: latest-by-mtime picks the newest installed plugin version; good
+    // enough because the plugin updater always touches the new version dir last.
+    const body = isVersionedInstall
+      ? `#!/bin/sh\nDIR="$(ls -td "${versionsRoot}"/*/ 2>/dev/null | head -1)"\nexec node "\${DIR}${wrapper.rel}" "$@"\n`
+      : `#!/bin/sh\nexec node "${path.join(pluginRoot, wrapper.rel)}" "$@"\n`;
+    const dest = path.join(binDir, wrapper.name);
+    await fs.writeFile(dest, body, "utf8");
+    await fs.chmod(dest, 0o755);
+    process.stdout.write(`linked ${dest}\n`);
+  }
+
+  const onPath = (process.env.PATH || "").split(path.delimiter).includes(binDir);
+  if (!onPath) {
+    process.stdout.write(
+      `\n${binDir} is not on your PATH. Add this to your shell profile:\n  export PATH="$HOME/.local/bin:$PATH"\n`,
+    );
+  }
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
-    throw new Error("subcommand required: setup, models, task, task-worker, status, result, cancel, usage");
+    throw new Error("subcommand required: setup, models, task, task-worker, status, result, cancel, usage, link");
   }
 
   switch (command) {
@@ -1215,6 +1253,9 @@ async function main() {
       return 0;
     case "usage":
       await usageCommand(flags);
+      return 0;
+    case "link":
+      await linkCommand();
       return 0;
     default:
       throw new Error(`unknown subcommand ${command}`);

@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Multi-provider delegation plugins for Claude Code: route sub-tasks to external frontier models.",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "plugins": [
     {
       "name": "frontier",
       "description": "Delegate bounded coding sub-tasks from Claude Code to external frontier models (Qwen, Kimi, DeepSeek, GLM) via OpenRouter, SiliconFlow, DeepInfra or Cerebras.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "NightZpy"
       },
