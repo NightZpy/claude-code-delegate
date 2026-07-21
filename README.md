@@ -1,4 +1,4 @@
-# frontier-delegate
+# claude-code-delegate
 
 A [Claude Code](https://claude.com/claude-code) plugin marketplace. Its one plugin, `frontier`, delegates bounded coding sub-tasks — boilerplate, tests, mechanical refactors, diff review, long-context analysis — from Claude Code to external frontier models (Qwen, Kimi, DeepSeek, GLM, Grok) over OpenAI-compatible APIs, so the expensive Claude context in your session is spent on planning and judgment rather than on generation. The architecture mirrors the `openai-codex` plugin: a companion runtime script, a thin forwarding subagent, and a set of slash commands.
 
@@ -9,8 +9,8 @@ Token economics. In a planner/executor split, the planner (Claude) reads the rep
 ## Install
 
 ```
-/plugin marketplace add NightZpy/frontier-delegate
-/plugin install frontier@frontier-delegate
+/plugin marketplace add NightZpy/claude-code-delegate
+/plugin install frontier@claude-code-delegate
 ```
 
 ## Setup keys
@@ -101,7 +101,7 @@ The `plan-big-execute-small` skill already splits execution between Claude subag
 ## Architecture
 
 ```
-frontier-delegate/
+claude-code-delegate/
   .claude-plugin/
     marketplace.json
   plugins/

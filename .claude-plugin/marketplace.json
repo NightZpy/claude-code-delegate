@@ -1,5 +1,5 @@
 {
-  "name": "frontier-delegate",
+  "name": "claude-code-delegate",
   "owner": { "name": "NightZpy" },
   "metadata": {
     "description": "Multi-provider delegation plugins for Claude Code: route sub-tasks to external frontier models.",
