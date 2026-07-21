@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-export const ENV_FILE = path.join(os.homedir(), ".claude", "frontier", ".env");
+export const FRONTIER_HOME = path.join(os.homedir(), ".claude", "frontier");
+export const ENV_FILE = path.join(FRONTIER_HOME, ".env");
+export const USAGE_LEDGER_FILE = path.join(FRONTIER_HOME, "usage.jsonl");
 
 function parseEnv(text) {
   const values = {};

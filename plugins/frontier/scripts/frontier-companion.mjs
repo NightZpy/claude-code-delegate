@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "./lib/args.mjs";
-import { ENV_FILE, loadKeys } from "./lib/env.mjs";
+import { ENV_FILE, USAGE_LEDGER_FILE, loadKeys } from "./lib/env.mjs";
 import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import { PROVIDERS, callProvider } from "./lib/providers.mjs";
 import {
@@ -56,6 +56,257 @@ function computeCost(pricing = {}, usage = {}) {
   const promptCost = (Number(usage.prompt_tokens || 0) / 1000000) * input;
   const completionCost = (Number(usage.completion_tokens || 0) / 1000000) * output;
   return Number((promptCost + completionCost).toFixed(6));
+}
+
+function padCell(value, width, align = "left") {
+  const text = String(value);
+  return align === "right" ? text.padStart(width) : text.padEnd(width);
+}
+
+function formatUsd(value) {
+  return Number(value || 0).toFixed(6);
+}
+
+function formatInteger(value) {
+  return Math.round(Number(value || 0)).toLocaleString("en-US");
+}
+
+function formatSessionLabel(value) {
+  if (value === null || value === undefined || value === "") {
+    return "(no session)";
+  }
+  const text = String(value);
+  return text.length > 8 ? `${text.slice(0, 8)}…` : text;
+}
+
+function printAlignedTable(headers, rows) {
+  const widths = headers.map((header, index) =>
+    Math.max(
+      header.label.length,
+      ...rows.map((row) => String(row[index] ?? "").length),
+    ),
+  );
+  const lines = [
+    headers.map((header, index) => padCell(header.label, widths[index], header.align)).join("  "),
+    headers.map((_, index) => "-".repeat(widths[index])).join("  "),
+    ...rows.map((row) =>
+      headers
+        .map((header, index) => padCell(row[index] ?? "", widths[index], header.align))
+        .join("  "),
+    ),
+  ];
+  return lines.join("\n");
+}
+
+async function readUsageLedger() {
+  try {
+    const text = await fs.readFile(USAGE_LEDGER_FILE, "utf8");
+    return text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return [parsed];
+        } catch {
+          return [];
+        }
+      });
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function aggregateUsage(entries) {
+  const totals = {
+    jobs: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cost: 0,
+  };
+  const byModel = {};
+  const byProvider = {};
+  const bySession = {};
+
+  for (const entry of entries) {
+    const model = String(entry.model || "unknown");
+    const provider = String(entry.provider || "unknown");
+    const sessionKey = entry.sessionId === null || entry.sessionId === undefined ? "null" : String(entry.sessionId);
+    const promptTokens = Number(entry.promptTokens || 0);
+    const completionTokens = Number(entry.completionTokens || 0);
+    const cost = Number(entry.cost || 0);
+
+    totals.jobs += 1;
+    totals.promptTokens += promptTokens;
+    totals.completionTokens += completionTokens;
+    totals.cost += cost;
+
+    if (!byModel[model]) {
+      byModel[model] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+    }
+    if (!byProvider[provider]) {
+      byProvider[provider] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+    }
+    if (!bySession[sessionKey]) {
+      bySession[sessionKey] = { jobs: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
+    }
+
+    for (const bucket of [byModel[model], byProvider[provider], bySession[sessionKey]]) {
+      bucket.jobs += 1;
+      bucket.promptTokens += promptTokens;
+      bucket.completionTokens += completionTokens;
+      bucket.cost += cost;
+    }
+  }
+
+  totals.cost = Number(totals.cost.toFixed(6));
+  for (const bucket of Object.values(byModel)) {
+    bucket.cost = Number(bucket.cost.toFixed(6));
+  }
+  for (const bucket of Object.values(byProvider)) {
+    bucket.cost = Number(bucket.cost.toFixed(6));
+  }
+  for (const bucket of Object.values(bySession)) {
+    bucket.cost = Number(bucket.cost.toFixed(6));
+  }
+
+  return { totals, byModel, byProvider, bySession };
+}
+
+function sortUsageBuckets(buckets) {
+  return Object.entries(buckets).sort((left, right) => {
+    const costDelta = Number(right[1].cost || 0) - Number(left[1].cost || 0);
+    if (costDelta !== 0) {
+      return costDelta;
+    }
+    return left[0].localeCompare(right[0]);
+  });
+}
+
+async function usageCommand(flags) {
+  const entries = await readUsageLedger();
+  const modelFilter = typeof flags.model === "string" ? flags.model : null;
+  const sessionFilterRaw = flags.session;
+  const days = flags.days !== undefined ? Number(flags.days) : null;
+  const since =
+    days !== null && Number.isFinite(days) && days >= 0
+      ? new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+      : null;
+  let sessionFilter = null;
+
+  if (sessionFilterRaw !== undefined) {
+    if (sessionFilterRaw === true || sessionFilterRaw === "current") {
+      if (!process.env.FRONTIER_SESSION_ID) {
+        process.stdout.write("no current session id (FRONTIER_SESSION_ID not set)\n");
+        return;
+      }
+      sessionFilter = process.env.FRONTIER_SESSION_ID;
+    } else if (sessionFilterRaw === null) {
+      sessionFilter = null;
+    } else {
+      sessionFilter = String(sessionFilterRaw);
+    }
+  }
+
+  const filtered = entries.filter((entry) => {
+    if (modelFilter && entry.model !== modelFilter) {
+      return false;
+    }
+    if (sessionFilter) {
+      const sessionId = entry.sessionId === null || entry.sessionId === undefined ? null : String(entry.sessionId);
+      if (!sessionId || !sessionId.startsWith(sessionFilter)) {
+        return false;
+      }
+    }
+    if (since && Date.parse(entry.ts) < since.getTime()) {
+      return false;
+    }
+    return true;
+  });
+
+  const payload = {
+    ...aggregateUsage(filtered),
+    since: since ? since.toISOString() : null,
+  };
+
+  if (flags.json) {
+    printJson(payload);
+    return;
+  }
+
+  if (!filtered.length) {
+    process.stdout.write("no usage recorded yet\n");
+    return;
+  }
+
+  const summary = [
+    "Summary",
+    `jobs: ${formatInteger(payload.totals.jobs)}`,
+    `prompt tokens: ${formatInteger(payload.totals.promptTokens)}`,
+    `completion tokens: ${formatInteger(payload.totals.completionTokens)}`,
+    `total cost USD: ${formatUsd(payload.totals.cost)}`,
+  ];
+
+  const modelRows = sortUsageBuckets(payload.byModel).map(([name, stats]) => [
+    name,
+    formatInteger(stats.jobs),
+    formatInteger(stats.promptTokens),
+    formatInteger(stats.completionTokens),
+    formatUsd(stats.cost),
+  ]);
+  const providerRows = sortUsageBuckets(payload.byProvider).map(([name, stats]) => [
+    name,
+    formatInteger(stats.jobs),
+    formatInteger(stats.promptTokens),
+    formatInteger(stats.completionTokens),
+    formatUsd(stats.cost),
+  ]);
+  const sessionRows = sortUsageBuckets(payload.bySession).map(([name, stats]) => [
+    formatSessionLabel(name === "null" ? null : name),
+    formatInteger(stats.jobs),
+    formatInteger(stats.promptTokens),
+    formatInteger(stats.completionTokens),
+    formatUsd(stats.cost),
+  ]);
+
+  const sections = [
+    summary.join("\n"),
+    `By model\n${printAlignedTable(
+      [
+        { label: "MODEL", align: "left" },
+        { label: "JOBS", align: "right" },
+        { label: "PROMPT TOKENS", align: "right" },
+        { label: "COMPLETION TOKENS", align: "right" },
+        { label: "COST USD", align: "right" },
+      ],
+      modelRows,
+    )}`,
+    `By provider\n${printAlignedTable(
+      [
+        { label: "PROVIDER", align: "left" },
+        { label: "JOBS", align: "right" },
+        { label: "PROMPT TOKENS", align: "right" },
+        { label: "COMPLETION TOKENS", align: "right" },
+        { label: "COST USD", align: "right" },
+      ],
+      providerRows,
+    )}`,
+    `By session\n${printAlignedTable(
+      [
+        { label: "SESSION", align: "left" },
+        { label: "JOBS", align: "right" },
+        { label: "PROMPT TOKENS", align: "right" },
+        { label: "COMPLETION TOKENS", align: "right" },
+        { label: "COST USD", align: "right" },
+      ],
+      sessionRows,
+    )}`,
+  ];
+  process.stdout.write(`${sections.join("\n\n")}\n`);
 }
 
 async function readModelsRegistry() {
@@ -547,7 +798,7 @@ async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
-    throw new Error("subcommand required: setup, models, task, task-worker, status, result, cancel");
+    throw new Error("subcommand required: setup, models, task, task-worker, status, result, cancel, usage");
   }
 
   switch (command) {
@@ -569,6 +820,9 @@ async function main() {
       return 0;
     case "cancel":
       await cancelCommand(cwd, positionals);
+      return 0;
+    case "usage":
+      await usageCommand(flags);
       return 0;
     default:
       throw new Error(`unknown subcommand ${command}`);

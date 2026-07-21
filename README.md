@@ -65,6 +65,7 @@ Data from research as of July 2026.
 | `/frontier:status` | Check a background job's status | `/frontier:status <jobId>` |
 | `/frontier:result` | Fetch a finished background job's output | `/frontier:result <jobId>` |
 | `/frontier:cancel` | Cancel a running background job | `/frontier:cancel <jobId>` |
+| `/frontier:usage` | Show aggregated token and cost usage across frontier delegations | `/frontier:usage --days 7 --model qwen --session current` |
 | `/frontier:setup` | Check readiness (keys present, providers reachable) | `/frontier:setup` |
 
 ## How it works
@@ -80,12 +81,15 @@ frontier-companion.mjs task [--background] [--model qwen|kimi|deepseek|glm|grok]
 frontier-companion.mjs status
 frontier-companion.mjs result
 frontier-companion.mjs cancel
+frontier-companion.mjs usage [--days N] [--model qwen|kimi|deepseek|glm|grok] [--session <id|current>] [--json]
 ```
 
 - **Background jobs** run as a detached process, with state persisted to disk so `status`/`result`/`cancel` can be called from a later, unrelated Claude Code turn.
 - **Context inlining**: `--file` and `--diff` read local content and fold it into the prompt sent to the external model — the model itself has no filesystem or tool access.
 - **Provider fallback**: each model alias maps to one or more providers; if the pinned or default provider fails, the runtime retries against the next one that serves that model.
 - **Cost tracking**: token usage and estimated cost are recorded per job.
+- **Usage ledger**: every provider response appends one JSONL record to `~/.claude/frontier/usage.jsonl`, so spend can be inspected across workspaces with `/frontier:usage`.
+- **Session breakdown**: usage is also grouped per Claude Code session via a `SessionStart` hook that stores `FRONTIER_SESSION_ID` in Claude's env file for later task processes.
 - **State**: job state and the `.env` key file live under `~/.claude/frontier/`, outside the plugin and outside any project repo.
 
 v1 is text-in/text-out: the external model has no tools and returns code or patches as text, which Claude then applies and verifies. There is no agentic loop in this version.
@@ -108,9 +112,12 @@ frontier-delegate/
         frontier-runner.md          # thin forwarder subagent
       commands/
         task.md, qwen.md, kimi.md, deepseek.md, glm.md, grok.md
-        status.md, result.md, cancel.md, setup.md
+        status.md, result.md, cancel.md, usage.md, setup.md
+      hooks/
+        hooks.json                  # SessionStart hook to persist Claude session id
       scripts/
-        frontier-companion.mjs      # runtime: task, status, result, cancel, setup, models
+        frontier-companion.mjs      # runtime: task, status, result, cancel, usage, setup, models
+        session-hook.mjs            # writes FRONTIER_SESSION_ID into Claude env file
         setup-keys.mjs              # interactive key setup
       skills/
         frontier-runtime/

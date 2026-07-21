@@ -14,7 +14,7 @@ Primary helper:
 Execution rules:
 - The runner subagent is a forwarder, not an orchestrator. Its only job is to invoke `task` once and return that stdout unchanged.
 - Prefer the helper over hand-rolled `curl`, direct provider API calls, or any other Bash activity.
-- Do not call `setup`, `models`, `status`, `result`, or `cancel` from `frontier:frontier-runner`.
+- Do not call `setup`, `models`, `status`, `result`, `cancel`, or `usage` from `frontier:frontier-runner`.
 - Never invoke `task-worker` directly — it is an internal implementation detail of `task --background`.
 
 Available flags on `task`:
