@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# frontier companion CLI: task | status | result | cancel | usage | models | setup
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec node "$DIR/../scripts/frontier-companion.mjs" "$@"

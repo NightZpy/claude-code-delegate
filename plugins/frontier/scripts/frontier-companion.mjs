@@ -505,7 +505,7 @@ async function executeTaskRequest(job, models, request, tools) {
     const wanted = selection.providers.map((p) => p.name).join(", ");
     throw new Error(
       `no API key configured for any provider of model ${selection.alias} (needs one of: ${wanted}). ` +
-        `Configure keys by running this in your terminal (or type it prefixed with "! " in Claude Code):\n` +
+        `Configure keys: in Claude Code type \`! frontier-keys\`, or run in your terminal:\n` +
         `  node "${setupScript}"`,
     );
   }

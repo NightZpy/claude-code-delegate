@@ -12,7 +12,7 @@ If any required API key (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA
 - Tell the user to run the interactive key setup themselves, in their own terminal, since it needs their input:
 
 ```
-! node "${CLAUDE_PLUGIN_ROOT}/scripts/setup-keys.mjs"
+! frontier-keys
 ```
 
 - Do not run `setup-keys.mjs` yourself — it is interactive and must be run by the user.

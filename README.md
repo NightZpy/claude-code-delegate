@@ -18,13 +18,13 @@ Token economics. In a planner/executor split, the planner (Claude) reads the rep
 Run the interactive key setup once, either in a regular terminal or from inside Claude Code with `!`:
 
 ```
-node plugins/frontier/scripts/setup-keys.mjs
+frontier-keys  # (o node plugins/frontier/scripts/setup-keys.mjs)
 ```
 
 or, from a Claude Code session:
 
 ```
-! node plugins/frontier/scripts/setup-keys.mjs
+! frontier-keys  # (o node plugins/frontier/scripts/setup-keys.mjs)
 ```
 
 Input is visible as you type. Keys are written to `~/.claude/frontier/.env` with `chmod 600`. The runtime reads `process.env` first, then falls back to that file.
