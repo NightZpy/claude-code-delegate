@@ -813,6 +813,20 @@ async function runUsageTui(flags) {
   }
 }
 
+// Clip every line to the terminal width before printing so table rows can
+// never wrap in the static (non-TUI) usage views either. No-op when stdout
+// isn't a TTY — piped/redirected output keeps its full, unclipped width.
+function writeClippedToStdout(text) {
+  const columns = process.stdout.isTTY ? process.stdout.columns : null;
+  const body = columns
+    ? text
+        .split("\n")
+        .map((line) => clipVisible(line, columns))
+        .join("\n")
+    : text;
+  process.stdout.write(`${body}\n`);
+}
+
 async function usageCommand(flags) {
   if (flags.details) {
     await usageDetailsCommand(flags);
@@ -859,7 +873,7 @@ async function usageCommand(flags) {
   const styles = usageStyles();
   const quotaSection = buildQuotaSection(config, entries, styles);
   const view = buildOverviewView(filtered, { since, sessionFilter, days }, styles, quotaSection);
-  process.stdout.write(`${view}\n`);
+  writeClippedToStdout(view);
 }
 
 async function usageDetailsCommand(flags) {
@@ -880,7 +894,7 @@ async function usageDetailsCommand(flags) {
   }
 
   const styles = usageStyles();
-  process.stdout.write(`${buildDetailsView(limited, styles)}\n`);
+  writeClippedToStdout(buildDetailsView(limited, styles));
 }
 
 function computeGroupStats(entries, names, keyOf) {
@@ -1020,7 +1034,7 @@ async function usageHealthCommand(flags) {
   }
 
   const styles = usageStyles();
-  process.stdout.write(`${buildHealthView(normalized, modelStats, providerStats, warnings, styles, activeAdvisories)}\n`);
+  writeClippedToStdout(buildHealthView(normalized, modelStats, providerStats, warnings, styles, activeAdvisories));
 }
 
 async function readModelsRegistry() {
