@@ -26,14 +26,16 @@ Available flags on `task`:
 - `--system <txt>` — override the system prompt.
 - `--max-tokens N` — cap output tokens.
 - `--prompt-file <path>` — read the prompt from a file instead of the CLI argument.
+- `--resume <jobId|last>` — continue a prior completed job's conversation instead of starting a new thread; `last` resumes the most recent job.
 - `--json` — emit machine-readable output.
 
 Command selection:
 - Use exactly one `task` invocation per delegation.
-- Pass `--model`, `--provider`, and `--background` as separate flags; never fold them into the natural-language prompt text.
+- Pass `--model`, `--provider`, `--background`, and `--resume` as separate flags; never fold them into the natural-language prompt text.
 - Use `--file` for every file the brief names as context; do not read or inline file contents yourself.
 - Use `--diff` when the brief asks to review or reason about the current working changes.
 - Prefer `--background` for long-running, open-ended, or multi-step delegations. Prefer foreground for small, clearly bounded ones.
+- Use `--resume last` or `--resume <jobId>` when the brief asks to continue, follow up on, or iterate on a prior delegation instead of starting fresh.
 
 Safety rules:
 - Never print or echo API keys (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA_API_KEY`, `CEREBRAS_API_KEY`) or the contents of `~/.claude/cc-delegate/.env`.

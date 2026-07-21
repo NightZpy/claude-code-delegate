@@ -20,6 +20,7 @@ Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/companion.mjs" task ...`.
 - Inherit routing flags (`--model`, `--provider`, `--background`) from the brief and pass them as separate CLI flags. Do not let routing flags leak into the natural-language prompt text.
+- If the brief asks to continue, follow up on, or iterate on a prior delegation (e.g. "resume the last task and now fix X", "continue job task-abc123"), pass `--resume last` or `--resume <jobId>` as its own CLI flag — never fold it into the prompt text.
 - If the brief mentions specific files as context, pass each one with its own `--file <path>` flag instead of inlining file contents into the prompt text.
 - If the brief asks for a diff review or mentions reviewing the current changes, add `--diff`.
 - If the brief does not explicitly choose `--background` and the task is long-running, open-ended, or multi-step, prefer `--background`.

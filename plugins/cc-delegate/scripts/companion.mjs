@@ -1177,6 +1177,103 @@ function estimatePromptTokens(messages) {
   return Math.ceil(chars / 4);
 }
 
+const CONVERSATION_CHAR_LIMIT = 2_000_000;
+const CONVERSATION_TAIL_KEEP = 6;
+const CONVERSATION_PRUNE_MARKER = "[older turns pruned]";
+
+// ponytail: prune by whole user+assistant pairs, oldest first, keeping the
+// system message and the last CONVERSATION_TAIL_KEEP messages intact — good
+// enough until real summarization-based compaction is worth the complexity.
+function pruneConversation(conversation) {
+  const totalChars = conversation.reduce((sum, message) => sum + String(message.content || "").length, 0);
+  if (totalChars <= CONVERSATION_CHAR_LIMIT) {
+    return conversation;
+  }
+
+  const hasSystem = conversation[0]?.role === "system";
+  const head = hasSystem ? [conversation[0]] : [];
+  const rest = hasSystem ? conversation.slice(1) : conversation;
+  if (rest.length <= CONVERSATION_TAIL_KEEP) {
+    return conversation; // nothing safe to prune
+  }
+
+  const tail = rest.slice(-CONVERSATION_TAIL_KEEP);
+  let middle = rest.slice(0, rest.length - CONVERSATION_TAIL_KEEP);
+  let pruned = false;
+  const sizeOf = (msgs) => msgs.reduce((sum, message) => sum + String(message.content || "").length, 0);
+  while (middle.length >= 2 && sizeOf(head) + sizeOf(middle) + sizeOf(tail) > CONVERSATION_CHAR_LIMIT) {
+    middle = middle.slice(2);
+    pruned = true;
+  }
+  if (!pruned) {
+    return conversation;
+  }
+  // Prepend the marker to the first kept user turn instead of inserting a
+  // standalone user message — a separate marker would create two consecutive
+  // user turns and strict chat templates reject non-alternating roles.
+  const kept = [...middle, ...tail];
+  const firstUserIndex = kept.findIndex((message) => message.role === "user");
+  if (firstUserIndex !== -1) {
+    kept[firstUserIndex] = {
+      ...kept[firstUserIndex],
+      content: `${CONVERSATION_PRUNE_MARKER}\n\n${kept[firstUserIndex].content}`,
+    };
+  }
+  return [...head, ...kept];
+}
+
+// Reconstructs the message history to resend when resuming a job: prefers the
+// persisted `conversation` array; falls back to rebuilding a 3-message
+// conversation from `request`/`result` for jobs completed before this field
+// existed.
+function getBaseConversation(job) {
+  if (Array.isArray(job.conversation) && job.conversation.length) {
+    return job.conversation;
+  }
+  if (job.request && job.result?.content) {
+    return [
+      { role: "system", content: job.request.system || DEFAULT_SYSTEM },
+      { role: "user", content: job.request.prompt },
+      { role: "assistant", content: job.result.content },
+    ];
+  }
+  throw new Error(`job ${job.id} has no conversation to resume`);
+}
+
+// Resolves the base job for `task --resume`. "last" means the most recently
+// updated COMPLETED job — a background job still running must not shadow the
+// previous resumable thread. An explicit id accepts an exact id or an
+// unambiguous prefix; a failed/cancelled match is a clear error.
+async function resolveResumeJob(cwd, resumeArg) {
+  let job;
+  if (resumeArg === "last") {
+    const jobs = await listJobs(cwd);
+    const lastCompleted = jobs.find((entry) => entry.status === "completed");
+    job = lastCompleted ? await loadJob(cwd, lastCompleted.id) : null;
+    if (!job) {
+      throw new Error("no completed job to resume in this workspace");
+    }
+  } else {
+    job = await loadJob(cwd, resumeArg);
+    if (!job) {
+      const jobs = await listJobs(cwd);
+      const matches = jobs.filter((entry) => entry.id.startsWith(resumeArg));
+      if (matches.length === 1) {
+        job = await loadJob(cwd, matches[0].id);
+      } else if (matches.length > 1) {
+        throw new Error(`job id "${resumeArg}" is ambiguous — matches ${matches.length} jobs`);
+      }
+    }
+  }
+  if (!job) {
+    throw new Error(`job ${resumeArg} not found`);
+  }
+  if (job.status !== "completed") {
+    throw new Error(`cannot resume a ${job.status} job`);
+  }
+  return job;
+}
+
 // Other registry models with a bigger context window than `currentAlias`,
 // able to actually fit `promptTokens` — quality >= current first, then the
 // rest, each group sorted by quality desc then context desc.
@@ -1237,13 +1334,24 @@ function evaluateContextWindow(models, alias, messages) {
 
 async function executeTaskRequest(job, models, request, tools) {
   const selection = resolveModelSelection(models, request.model, request.provider);
-  const messages = [
-    { role: "system", content: request.system || DEFAULT_SYSTEM },
-    { role: "user", content: request.prompt },
-  ];
+  const hasConversationSeed = Array.isArray(request.conversationSeed) && request.conversationSeed.length > 0;
+  const messages = hasConversationSeed
+    ? [...request.conversationSeed, { role: "user", content: request.prompt }]
+    : [
+        { role: "system", content: request.system || DEFAULT_SYSTEM },
+        { role: "user", content: request.prompt },
+      ];
+
+  if (hasConversationSeed) {
+    await tools.log(
+      `resuming from ${job.resumedFrom}: ${messages.length} messages carried into this request (${request.conversationSeed.length} prior + 1 new user turn)`,
+    );
+  }
 
   // Context-window guard runs before any provider/key check — a prompt that
   // can't fit is a fast, clean failure regardless of what keys are configured.
+  // Note: `messages` is the FULL re-sent conversation on a resume, so the
+  // guard measures the whole thread, not just the new turn.
   const contextGuard = evaluateContextWindow(models, selection.alias, messages);
   await tools.setJob({ ctxPct: contextGuard.ctxPct });
   if (contextGuard.exceeded) {
@@ -1292,6 +1400,8 @@ async function executeTaskRequest(job, models, request, tools) {
         attempts,
         provider: candidate.name,
       });
+      // ponytail: text-only history — no tool calls in the persisted conversation.
+      const conversation = pruneConversation([...messages, { role: "assistant", content }]);
       return {
         provider: candidate.name,
         attempts,
@@ -1300,6 +1410,7 @@ async function executeTaskRequest(job, models, request, tools) {
         latencyMs,
         ctxPct: contextGuard.ctxPct,
         contextAdvisory: contextGuard.advisoryLine,
+        conversation,
         result: {
           content,
           raw: response,
@@ -1348,6 +1459,7 @@ function summarizeJobForOutput(job, progressPreview) {
     tokens: job.usage,
     cost: job.cost,
     error: job.error,
+    resumedFrom: job.resumedFrom ?? null,
     elapsedMs,
     progressPreview,
   };
@@ -1488,12 +1600,34 @@ async function createTaskJob(cwd, flags, positionals) {
   const fileBlocks = await readFileAttachments(cwd, asArray(flags.file));
   const diffBlock = flags.diff ? await readGitDiff(cwd) : null;
   const userPrompt = buildUserMessage(prompt, fileBlocks, diffBlock);
+
+  let model = String(flags.model || "qwen");
+  let resumedFrom = null;
+  let conversationSeed = null;
+  let modelMismatchWarning = null;
+
+  if (flags.resume !== undefined) {
+    const resumeArg = String(flags.resume);
+    const baseJob = await resolveResumeJob(cwd, resumeArg);
+    resumedFrom = baseJob.id;
+    const explicitModel = typeof flags.model === "string" && flags.model !== baseJob.model;
+    if (explicitModel) {
+      model = String(flags.model);
+      modelMismatchWarning =
+        `--model ${model} differs from base job ${baseJob.id}'s model ${baseJob.model} — resuming without history`;
+    } else {
+      model = baseJob.model;
+      conversationSeed = getBaseConversation(baseJob);
+    }
+  }
+
   const request = {
-    model: String(flags.model || "qwen"),
+    model,
     provider: typeof flags.provider === "string" ? flags.provider : null,
     system: typeof flags.system === "string" ? flags.system : DEFAULT_SYSTEM,
     maxTokens: flags["max-tokens"] !== undefined ? Number(flags["max-tokens"]) : undefined,
     prompt: userPrompt,
+    conversationSeed,
   };
 
   const job = await createJob(cwd, {
@@ -1502,7 +1636,12 @@ async function createTaskJob(cwd, flags, positionals) {
     model: request.model,
     promptPreview: prompt.slice(0, 140),
     request,
+    resumedFrom,
   });
+
+  if (modelMismatchWarning) {
+    await appendJobLog(cwd, job.id, modelMismatchWarning);
+  }
 
   return job;
 }
@@ -1642,6 +1781,9 @@ async function statusCommand(cwd, flags, positionals) {
   const lines = [];
   if (jobId) {
     lines.push(`${payload.id} ${payload.status} elapsed=${payload.elapsedMs}ms`);
+    if (payload.resumedFrom) {
+      lines.push(`resumed from ${payload.resumedFrom}`);
+    }
     for (const line of payload.progressPreview) {
       lines.push(`  ${line}`);
     }
@@ -1654,7 +1796,8 @@ async function statusCommand(cwd, flags, positionals) {
     lines.push(`latest finished: ${payload.latestFinished.id} ${payload.latestFinished.status}`);
   }
   for (const job of payload.recent) {
-    lines.push(`${job.id} ${job.status} elapsed=${job.elapsedMs}ms`);
+    const resumedSuffix = job.resumedFrom ? ` (resumed from ${job.resumedFrom})` : "";
+    lines.push(`${job.id} ${job.status} elapsed=${job.elapsedMs}ms${resumedSuffix}`);
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
@@ -1679,6 +1822,7 @@ async function resultCommand(cwd, flags, positionals) {
     quota: job.quota || null,
     advisory: job.advisory || null,
     contextAdvisory: job.contextAdvisory || null,
+    resumedFrom: job.resumedFrom || null,
   };
 
   if (flags.json) {
@@ -1687,13 +1831,14 @@ async function resultCommand(cwd, flags, positionals) {
   }
 
   const alertPrefix = buildAlertPrefix(job);
+  const resumedLine = payload.resumedFrom ? `resumed from ${payload.resumedFrom}\n` : "";
 
   if (payload.output) {
-    process.stdout.write(`${alertPrefix}${payload.output}\n`);
+    process.stdout.write(`${resumedLine}${alertPrefix}${payload.output}\n`);
     return;
   }
 
-  process.stdout.write(`${alertPrefix}${payload.error || "no output stored"}\n`);
+  process.stdout.write(`${resumedLine}${alertPrefix}${payload.error || "no output stored"}\n`);
 }
 
 async function cancelCommand(cwd, positionals) {

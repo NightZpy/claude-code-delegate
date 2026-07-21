@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-21
+
+### Added
+- `task --resume <jobId|last>`: iterative thread direction — the orchestrator can send follow-ups without repacking context; conversation persisted per job, `resumedFrom` in status/result, context guard measures the full resent thread, 2M-char pruning keeps system + recent turns (alternation-safe marker).
+
+### Fixed
+- `--resume last` picks the most recently completed job (a running background job no longer shadows the resumable thread).
+
+## [0.5.3] - 2026-07-21
+
+### Fixed
+- Static TTY views (`--details`/`--health`) clip to terminal width (no wrapping); Analyze tab metric is now "top model by spend" (was misleading job-count tie).
+
+## [0.5.2] - 2026-07-21
+
+### Fixed
+- Removed duplicate `clipVisible` declaration that broke 0.5.1.
+
+## [0.5.1] - 2026-07-21
+
+### Changed
+- All user-facing strings and code comments in English; ANSI-aware line clipping in the TUI.
+
 ## [0.5.0] - 2026-07-21
 
 ### Added

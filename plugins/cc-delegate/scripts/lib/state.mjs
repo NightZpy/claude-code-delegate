@@ -201,6 +201,7 @@ export async function createJob(cwd, data) {
     provider: data.provider ?? null,
     promptPreview: data.promptPreview ?? "",
     request: data.request ?? null,
+    resumedFrom: data.resumedFrom ?? null,
     result: null,
     error: null,
     usage: null,

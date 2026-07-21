@@ -77,7 +77,8 @@ Data from research as of July 2026.
 cc-delegate setup [--json]
 cc-delegate models [--guide] [--json]
 cc-delegate task [--background] [--model qwen|kimi|deepseek|glm|grok] [--provider openrouter|siliconflow|deepinfra|cerebras]
-               [--file <path>]... [--diff] [--system <txt>] [--max-tokens N] [--prompt-file <path>] [--json] "<prompt>"
+               [--file <path>]... [--diff] [--system <txt>] [--max-tokens N] [--prompt-file <path>]
+               [--resume <jobId|last>] [--json] "<prompt>"
 cc-delegate status [job-id] [--all] [--json]
 cc-delegate result [job-id] [--json]
 cc-delegate cancel [job-id]
@@ -89,6 +90,18 @@ cc-delegate link
 ```
 
 `models --guide` prints the same provider price/verdict guide shown at the top of `cc-delegate-keys`. `analysis save` is written internally by `/cc-delegate:analyze`; `analysis show` reprints the last saved analysis standalone.
+
+## Iterative direction (threads)
+
+A completed task's full conversation (system + user + assistant, text only) is persisted on its job. `task --resume <jobId|last>` appends a new user turn to that history and re-sends the whole thread to the same model, instead of starting a fresh, context-free task each time:
+
+```
+cc-delegate task "add input validation to src/parser.ts"
+cc-delegate task --resume last "now add unit tests for the invalid-input cases"
+cc-delegate task --resume last "also handle empty-string input"
+```
+
+`--resume last` resumes the most recently completed job; a job id (or unambiguous prefix) resumes that job specifically. Only a `completed` job can be resumed — resuming a `failed` or `cancelled` job is a clear error. `status`/`result` show `resumedFrom` on a resumed job's output (`--json` too). An explicit `--model` that differs from the base job's model starts the new job without history (logged) rather than silently mixing conversations across models.
 
 ## Monitoring & cost control
 
