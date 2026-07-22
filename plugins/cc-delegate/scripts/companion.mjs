@@ -18,7 +18,7 @@ import {
 import { loadConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import { PROVIDERS, callProvider } from "./lib/providers.mjs";
-import { renderProviderGuide } from "./lib/providerGuide.mjs";
+import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
 import { buildHealthAdvisory, formatAdvisoryLines, listActiveAdvisories } from "./lib/advisor.mjs";
@@ -1541,7 +1541,10 @@ async function setupCommand(flags) {
 
   const config = await loadConfig();
   const entries = await readUsageLedger();
+  const models = await readModelsRegistry();
+  const activeProviders = new Set(getActiveProviders(models));
   for (const [provider, data] of Object.entries(payload.providers)) {
+    data.active = activeProviders.has(provider);
     const monthlyUsd = config.quotas[provider];
     if (monthlyUsd === undefined) {
       continue;
@@ -1560,7 +1563,14 @@ async function setupCommand(flags) {
     `env file: ${payload.envFile}`,
   ];
   for (const [provider, data] of Object.entries(payload.providers)) {
+    // Inactive providers (no model routes) only show up if a key is stored.
+    if (!data.active && !data.keyPresent) {
+      continue;
+    }
     let line = `${provider}: ${data.keyHint || "missing"}`;
+    if (!data.active) {
+      line += " (inactive — no model routes)";
+    }
     if (data.quota) {
       const icon = data.quota.level === "critical" ? " 🔴" : data.quota.level === "warning" ? " ⚠" : "";
       line += ` — quota ${formatUsd2(data.quota.monthlyUsd)}/mo, ${formatUsd2(data.quota.spentThisMonth)} spent (${Math.round(data.quota.pct)}%)${icon}`;
