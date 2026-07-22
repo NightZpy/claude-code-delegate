@@ -1692,7 +1692,11 @@ async function executeTaskRequest(job, models, request, tools) {
         response.choices?.[0]?.message?.content ??
         response.choices?.[0]?.text ??
         "";
-      const cost = computeCost(candidate.pricing || selection.pricing, usage);
+      // Prefer the provider's actual billed cost (OpenRouter reports it in
+      // usage.cost) — exact and self-reconciling; fall back to the registry
+      // estimate for providers that don't report it.
+      const reportedCost = Number(usage?.cost || 0);
+      const cost = reportedCost > 0 ? Number(reportedCost.toFixed(6)) : computeCost(candidate.pricing || selection.pricing, usage);
       attempt.outcome = "success";
       attempt.finishedAt = new Date().toISOString();
       await tools.setJob({

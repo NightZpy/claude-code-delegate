@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-07-22
+
+### Fixed (cost accounting — OpenRouter reconciliation)
+- Text-mode cost now uses the provider's ACTUAL billed cost when reported (OpenRouter returns `usage.cost` when the request sets `usage: { include: true }`), instead of a registry estimate — so recorded cost matches OpenRouter's own logs exactly. Registry pricing remains the fallback for providers that don't report cost. (The account-level `/activity` API needs a management key, so per-call actual cost is the reliable reconciliation path.)
 ## [0.15.0] - 2026-07-22
 
 ### Fixed (cost accounting — a ~17x under-count)

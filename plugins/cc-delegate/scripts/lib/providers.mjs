@@ -147,6 +147,9 @@ export async function callProvider(providerName, modelId, messages, opts = {}) {
         max_tokens: opts.maxTokens,
         stream: true,
         stream_options: { include_usage: true },
+        // OpenRouter returns the actual billed cost + cached-token breakdown in
+        // usage when this is set; providers that don't support it ignore it.
+        usage: { include: true },
         ...opts.requestParams,
       }),
     });
