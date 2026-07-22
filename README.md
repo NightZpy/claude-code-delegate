@@ -159,7 +159,7 @@ claude-code-delegate/
 
 ## Using with plan-big-execute-small
 
-The `plan-big-execute-small` skill already splits execution between Claude subagents and Codex. `cc-delegate` is a third, cheaper executor fleet for the same pattern: pure-generation steps that don't need tool access — bulk boilerplate, mechanical text refactors, test writing, diff review, very-long-context analysis — can go to a frontier model instead of a Claude or Codex subagent, with Claude (or a cheap subagent) still responsible for applying and verifying the output.
+The [`plan-big-execute-small`](https://github.com/NightZpy/claude-skills/blob/main/plan-big-execute-small/SKILL.md) skill already splits execution between Claude subagents and Codex. `cc-delegate` is a third, cheaper executor fleet for the same pattern: pure-generation steps that don't need tool access — bulk boilerplate, mechanical text refactors, test writing, diff review, very-long-context analysis — can go to a frontier model instead of a Claude or Codex subagent, with Claude (or a cheap subagent) still responsible for applying and verifying the output.
 
 ## Roadmap
 
