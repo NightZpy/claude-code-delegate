@@ -21,6 +21,8 @@ import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import {
   checkServerHealth,
   ensureLeanAgents,
+  listMessages,
+  summarizeActivity,
   createSession,
   ensureServer,
   extractText,
@@ -617,16 +619,23 @@ async function buildQuotasView(config, entries, styles) {
 
 const USAGE_TABS = ["Overview", "Details", "Health", "Quotas", "Analyze"];
 
-function buildTabBar(activeIndex, detailsLabel = null) {
+function buildTabBar(activeIndex, modeScope = "all") {
   const names = USAGE_TABS.map((name, index) => {
-    let display = name;
-    if (index === 1 && detailsLabel) {
-      display = `${name}·${detailsLabel}`;
-    }
-    return index === activeIndex ? `\x1b[7m ${display} \x1b[0m` : ` ${display} `;
+    const display = index === activeIndex ? `\x1b[7m ${name} \x1b[0m` : ` ${name} `;
+    return display;
   });
   return names.join("│");
 }
+
+// Prominent mode-scope selector rendered as its own header line.
+function buildModeBadge(modeScope, styles) {
+  const opts = ["all", "text", "agentic"];
+  const cells = opts.map((opt) =>
+    opt === modeScope ? styles.cyan(`\x1b[7m ${opt} \x1b[0m`) : styles.dim(` ${opt} `),
+  );
+  return `${styles.dim("mode:")} ${cells.join(styles.dim("·"))}`;
+}
+
 
 
 // Builds the human-readable Analyze body (no trailing newline). Static,
@@ -696,69 +705,103 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
 }
 
 
-function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis) {
-  const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
-
+// buildUsageTabBody
+function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all') {
+  if (modeScope !== "all" && entries.length === 0) {
+    return `  ${styles.dim(`no ${modeScope} delegations yet`)}`;
+  }
   if (tabIndex === 3) {
+    // Quotas tab: use the already filtered entries
     return buildQuotasView(config, entries, styles);
   }
-  if (sessionError) {
-    return sessionError;
-  }
+
+  // Overview
   if (tabIndex === 0) {
     const quotaSection = buildQuotaSection(config, entries, styles);
-    return buildOverviewView(filtered, { since, sessionFilter, days }, styles, quotaSection);
+    return buildOverviewView(
+      entries,
+      { since: null, sessionFilter: null, days: null },
+      styles,
+      quotaSection
+    );
   }
+
+  // Details
   if (tabIndex === 1) {
-    const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
-    const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
+    const limit =
+      flags.limit !== undefined && Number.isFinite(Number(flags.limit))
+        ? Number(flags.limit)
+        : 20;
+    const sorted = [...entries].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
     const limited = sorted.slice(0, Math.max(0, limit));
-    if (flags.mode === "agentic") {
+    if (modeScope === "agentic") {
       return buildAgenticDetailsView(limited, styles);
     }
     return buildDetailsView(limited, styles);
   }
 
-  const normalized = filtered.map(normalizeLedgerEntry);
-  const hasAgentic = normalized.some(e => (e.mode || "text") === "agentic");
+  const normalized = entries.map(normalizeLedgerEntry);
+  const hasAgentic = normalized.some((e) => (e.mode || "text") === "agentic");
 
   let modelStats, providerStats;
-  let agenticModelStats = null, agenticProviderStats = null;
+  let agenticModelStats = null,
+    agenticProviderStats = null;
 
   if (hasAgentic) {
-    const textNormalized = normalized.filter(e => (e.mode || "text") === "text");
-    const agenticNormalized = normalized.filter(e => (e.mode || "text") === "agentic");
+    const textNormalized = normalized.filter((e) => (e.mode || "text") === "text");
+    const agenticNormalized = normalized.filter((e) => (e.mode || "text") === "agentic");
 
-    const textModelNames = [...new Set(textNormalized.map(entry => String(entry.model || "unknown")))].sort();
+    const textModelNames = [
+      ...new Set(textNormalized.map((entry) => String(entry.model || "unknown"))),
+    ].sort();
     const textProviderNames = new Set();
     for (const entry of textNormalized) {
-      if (entry.status === "completed" && entry.provider) textProviderNames.add(entry.provider);
+      if (entry.status === "completed" && entry.provider)
+        textProviderNames.add(entry.provider);
       for (const fp of entry.failedProviders) textProviderNames.add(fp);
     }
     const textProviderArr = [...textProviderNames].sort();
 
-    modelStats = computeGroupStats(textNormalized, textModelNames, entry => String(entry.model || "unknown"));
+    modelStats = computeGroupStats(
+      textNormalized,
+      textModelNames,
+      (entry) => String(entry.model || "unknown")
+    );
     providerStats = computeProviderStats(textNormalized, textProviderArr);
 
-    const agenticModelNames = [...new Set(agenticNormalized.map(entry => String(entry.model || "unknown")))].sort();
+    const agenticModelNames = [
+      ...new Set(agenticNormalized.map((entry) => String(entry.model || "unknown"))),
+    ].sort();
     const agenticProviderNames = new Set();
     for (const entry of agenticNormalized) {
-      if (entry.status === "completed" && entry.provider) agenticProviderNames.add(entry.provider);
+      if (entry.status === "completed" && entry.provider)
+        agenticProviderNames.add(entry.provider);
       for (const fp of entry.failedProviders) agenticProviderNames.add(fp);
     }
     const agenticProviderArr = [...agenticProviderNames].sort();
 
-    agenticModelStats = computeGroupStats(agenticNormalized, agenticModelNames, entry => String(entry.model || "unknown"));
+    agenticModelStats = computeGroupStats(
+      agenticNormalized,
+      agenticModelNames,
+      (entry) => String(entry.model || "unknown")
+    );
     agenticProviderStats = computeProviderStats(agenticNormalized, agenticProviderArr);
   } else {
-    const modelNames = [...new Set(normalized.map(entry => String(entry.model || "unknown")))].sort();
+    const modelNames = [
+      ...new Set(normalized.map((entry) => String(entry.model || "unknown"))),
+    ].sort();
     const providerNamesFromLedger = new Set();
     for (const entry of normalized) {
-      if (entry.status === "completed" && entry.provider) providerNamesFromLedger.add(entry.provider);
+      if (entry.status === "completed" && entry.provider)
+        providerNamesFromLedger.add(entry.provider);
       for (const fp of entry.failedProviders) providerNamesFromLedger.add(fp);
     }
     const providerNames = [...providerNamesFromLedger].sort();
-    modelStats = computeGroupStats(normalized, modelNames, entry => String(entry.model || "unknown"));
+    modelStats = computeGroupStats(
+      normalized,
+      modelNames,
+      (entry) => String(entry.model || "unknown")
+    );
     providerStats = computeProviderStats(normalized, providerNames);
   }
 
@@ -769,12 +812,24 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
   const activeAdvisories = listActiveAdvisories(normalized, models);
 
   if (tabIndex === 4) {
-    return buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAnalysis, styles);
+    // Analyze: operate on the filtered subset
+    return buildAnalyzeView(entries, entries, warnings, activeAdvisories, savedAnalysis, styles);
   }
-  return buildHealthView(normalized, modelStats, providerStats, warnings, styles, activeAdvisories, agenticModelStats, agenticProviderStats);
+  // Health
+  return buildHealthView(
+    normalized,
+    modelStats,
+    providerStats,
+    warnings,
+    styles,
+    activeAdvisories,
+    agenticModelStats,
+    agenticProviderStats
+  );
 }
 
 
+
 // Interactive tabbed usage viewer. Entered only when stdout/stdin are both
 // TTYs and no view flag (--details/--health/--json) or --static was passed.
 // ponytail: no scroll — content taller than the terminal is truncated with a
@@ -783,6 +838,7 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
 // TTYs and no view flag (--details/--health/--json) or --static was passed.
 // ponytail: no scroll — content taller than the terminal is truncated with a
 // hint to use the static --details/--limit view instead of building a pager.
+// runUsageTui
 async function runUsageTui(flags) {
   const stdout = process.stdout;
   const stdin = process.stdin;
@@ -791,27 +847,39 @@ async function runUsageTui(flags) {
   let entries = await readUsageLedger();
   let savedAnalysis = await readSavedAnalysis();
   let activeTab = 0;
-  let detailsMode = "all"; // all | text | agentic
+  let modeScope = "all"; // all | text | agentic
   const wasRaw = Boolean(stdin.isRaw);
   let lastError = null;
 
+  function filterEntriesByModeScope(allEntries, scope) {
+    if (scope === "all") return allEntries;
+    if (scope === "agentic") {
+      return allEntries.filter((e) => (e.mode || "text") === "agentic");
+    }
+    // text
+    return allEntries.filter((e) => (e.mode || "text") !== "agentic");
+  }
+
   function render() {
     const styles = usageStyles();
-    // Update flags.mode for Details tab filtering and view selection
-    if (activeTab === 1 && detailsMode !== "all") {
-      flags.mode = detailsMode;
-    } else if (activeTab === 1) {
-      delete flags.mode;
-    } else {
-      delete flags.mode; // not applicable on other tabs
-    }
-    const detailsLabel = activeTab === 1 && detailsMode !== "all" ? detailsMode : null;
-    const tabBar = buildTabBar(activeTab, detailsLabel);
-    const body = buildUsageTabBody(activeTab, entries, flags, config, styles, models, savedAnalysis);
-    const helpLine = styles.dim("←/→ or 1-5 switch view · r reload · m mode · q quit");
+    const scopedEntries = filterEntriesByModeScope(entries, modeScope);
+    const tabBar = buildTabBar(activeTab, modeScope);
+    const body = buildUsageTabBody(
+      activeTab,
+      scopedEntries,
+      flags,
+      config,
+      styles,
+      models,
+      savedAnalysis,
+      modeScope
+    );
+    const helpLine = styles.dim(
+      "←/→ or 1-5 switch view · r reload · g mode (all→text→agentic) · q quit"
+    );
 
     const rows = stdout.rows || 24;
-    const maxBodyLines = Math.max(1, rows - 3); // tab bar + blank line + help line
+    const maxBodyLines = Math.max(1, rows - 4); // tab bar + mode badge + blank + help
     let bodyLines = body.split("\n");
     let truncated = false;
     if (bodyLines.length > maxBodyLines) {
@@ -819,15 +887,18 @@ async function runUsageTui(flags) {
       truncated = true;
     }
 
-    const outLines = [tabBar, "", ...bodyLines];
+    const modeBadge = buildModeBadge(modeScope, styles);
+    const outLines = [tabBar, modeBadge, "", ...bodyLines];
     if (truncated) {
-      outLines.push(styles.dim("… (use the static view with --details --limit N to see everything)"));
+      outLines.push(
+        styles.dim("… (use the static view with --details --limit N to see everything)")
+      );
     }
     outLines.push(helpLine);
-    // Hard-clip every line to the terminal width — a wrapped table row would
-    // desynchronize the fixed-height layout above.
     const columns = stdout.columns || 100;
-    stdout.write(`\x1b[2J\x1b[H${outLines.map((line) => clipVisible(line, columns)).join("\n")}`);
+    stdout.write(
+      `\x1b[2J\x1b[H${outLines.map((line) => clipVisible(line, columns)).join("\n")}`
+    );
   }
 
   let resolveExit;
@@ -841,10 +912,6 @@ async function runUsageTui(flags) {
     resolveExit();
   }
 
-  // A raw PTY can deliver an escape sequence split across several `data`
-  // events (observed: byte-by-byte under `script`). Buffer input and, on a
-  // lone trailing ESC, wait briefly for the rest of the sequence before
-  // treating it as a standalone Escape keypress.
   let pending = "";
   let escTimer = null;
 
@@ -908,13 +975,13 @@ async function runUsageTui(flags) {
         entries = await readUsageLedger();
         savedAnalysis = await readSavedAnalysis();
         acted = true;
-      } else if (ch === "m" && activeTab === 1) {
-        if (detailsMode === "all") {
-          detailsMode = "text";
-        } else if (detailsMode === "text") {
-          detailsMode = "agentic";
+      } else if (ch === "g") {
+        if (modeScope === "all") {
+          modeScope = "text";
+        } else if (modeScope === "text") {
+          modeScope = "agentic";
         } else {
-          detailsMode = "all";
+          modeScope = "all";
         }
         acted = true;
       }
@@ -961,6 +1028,7 @@ async function runUsageTui(flags) {
     throw lastError;
   }
 }
+
 
 
 // Clip every line to the terminal width before printing so table rows can
@@ -1759,6 +1827,17 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     await tools.log(`touched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`);
   }
 
+  // Append live activity summary to the job log
+  try {
+    const messages = await listMessages(server, sessionId);
+    const activity = summarizeActivity(messages);
+    if (activity.length > 0) {
+      await tools.log(`agentic activity:\n${activity.map(l => `  ${l}`).join("\n")}`);
+    }
+  } catch {
+    // best-effort — never fail the job on activity polling
+  }
+
   return {
     provider: providerID || candidate.name,
     attempts: [],
@@ -1787,6 +1866,7 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     },
   };
 }
+
 
 function summarizeJobForOutput(job, progressPreview) {
   const startedAt = job.createdAt;
@@ -2198,6 +2278,30 @@ async function statusCommand(cwd, flags, positionals) {
     for (const line of payload.progressPreview) {
       lines.push(`  ${line}`);
     }
+
+    // Live activity summary for agentic jobs (best-effort, never throws)
+    if (payload.mode === "agentic") {
+      const job = await loadJob(cwd, jobId);
+      if (job && job.opencodeSessionId) {
+        try {
+          const serverState = await readServerState(CC_DELEGATE_HOME);
+          if (serverState) {
+            const server = { base: serverState.base, auth: makeBasicAuth(serverState.password) };
+            const messages = await listMessages(server, job.opencodeSessionId);
+            const activity = summarizeActivity(messages);
+            if (activity.length > 0) {
+              lines.push("agentic activity:");
+              for (const line of activity) {
+                lines.push(`  ${line}`);
+              }
+            }
+          }
+        } catch {
+          // silent fallback — log tail already shown above
+        }
+      }
+    }
+
     process.stdout.write(`${lines.join("\n")}\n`);
     return;
   }
@@ -2212,6 +2316,7 @@ async function statusCommand(cwd, flags, positionals) {
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
+
 
 async function resultCommand(cwd, flags, positionals) {
   const jobId = positionals[0];
@@ -2551,12 +2656,100 @@ async function gateCommand(positionals) {
   return 0;
 }
 
+async function watchCommand(cwd, flags, positionals) {
+  const jobId = positionals[0];
+  if (!jobId) throw new Error("watch requires a job id");
+
+  const job = await loadJob(cwd, jobId);
+  if (!job) throw new Error(`job ${jobId} not found`);
+
+  if (["completed", "failed", "cancelled"].includes(job.status)) {
+    // Already finished — print final activity and exit
+    await printFinalActivity(job);
+    return 0;
+  }
+
+  let lastActivityLines = [];
+  let lastLogSize = 0;
+
+  const printLines = (lines) => {
+    for (const line of lines) {
+      process.stdout.write(`${line}\n`);
+    }
+  };
+
+  const activityPoll = async () => {
+    const current = await loadJob(cwd, jobId);
+    if (!current || ["completed", "failed", "cancelled"].includes(current.status)) {
+      process.exit(0);
+    }
+    if (current.opencodeSessionId) {
+      try {
+        const serverState = await readServerState(CC_DELEGATE_HOME);
+        if (!serverState) throw new Error("no server");
+        const server = { base: serverState.base, auth: makeBasicAuth(serverState.password) };
+        const messages = await listMessages(server, current.opencodeSessionId);
+        const activity = summarizeActivity(messages);
+        const newLines = activity.slice(lastActivityLines.length);
+        if (newLines.length > 0) {
+          printLines(newLines);
+          lastActivityLines = activity;
+        }
+      } catch {
+        // fallback to log tail
+        await tailLogPoll(current);
+      }
+    } else {
+      await tailLogPoll(current);
+    }
+  };
+
+  const tailLogPoll = async (current) => {
+    try {
+      const tailLines = await readJobLogTail(cwd, current.id, 100);
+      if (tailLines.length > lastLogSize) {
+        const newLines = tailLines.slice(lastLogSize);
+        printLines(newLines);
+        lastLogSize = tailLines.length;
+      } else if (tailLines.length < lastLogSize) {
+        lastLogSize = 0; // log rolled over, start fresh
+      }
+    } catch {
+      // silent
+    }
+  };
+
+  process.stdout.write(`watching ${jobId}...\n`);
+  setInterval(activityPoll, 2000);
+  // keep process alive indefinitely; exit triggered inside interval on terminal status
+  return new Promise(() => {});
+}
+
+async function printFinalActivity(job) {
+  try {
+    if (job.opencodeSessionId) {
+      const serverState = await readServerState(CC_DELEGATE_HOME);
+      if (serverState) {
+        const server = { base: serverState.base, auth: makeBasicAuth(serverState.password) };
+        const messages = await listMessages(server, job.opencodeSessionId);
+        const activity = summarizeActivity(messages);
+        if (activity.length > 0) {
+          process.stdout.write(`agentic activity:\n${activity.map(l => `  ${l}`).join("\n")}\n`);
+        }
+      }
+    } else {
+      const tail = await readJobLogTail(job.cwd, job.id, 20);
+      for (const line of tail) process.stdout.write(`${line}\n`);
+    }
+  } catch {}
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, uninstall, link",
+      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
     );
   }
 
@@ -2598,6 +2791,8 @@ async function main() {
       return reviewCommand(cwd, { ...flags, adversarial: true }, positionals);
     case "gate":
       return gateCommand(positionals);
+    case "watch":
+      return watchCommand(cwd, flags, positionals);
     case "link":
       await linkCommand();
       return 0;

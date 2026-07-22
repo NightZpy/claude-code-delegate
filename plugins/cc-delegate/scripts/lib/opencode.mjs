@@ -389,3 +389,54 @@ export function extractText(response) {
   };
 }
 
+export async function listMessages(server, sessionId) {
+  return ocFetch(server, "GET", `/session/${sessionId}/message`);
+}
+
+function toolPartToLine(part) {
+  if (!part || typeof part !== "object") return null;
+  const name = part.name;
+  const args = part.arguments || part.args || {};
+  if (!name) return null;
+  const keyMap = {
+    read: "filePath",
+    edit: "filePath",
+    write: "filePath",
+    glob: "pattern",
+    grep: "pattern",
+    bash: "command",
+    list: "directory",
+  };
+  const primaryKey = keyMap[name] || "filePath" || "path" || "command" || "pattern";
+  let primaryValue = args[primaryKey];
+  if (primaryValue === undefined || primaryValue === null) {
+    // fallback: try any common keyword key
+    for (const key of ["filePath", "path", "command", "pattern", "directory", "query", "search", "name"]) {
+      if (args[key] !== undefined) {
+        primaryValue = args[key];
+        break;
+      }
+    }
+  }
+  let argStr = "";
+  if (primaryValue != null) {
+    argStr = typeof primaryValue === "string" ? primaryValue : JSON.stringify(primaryValue);
+    if (argStr.length > 60) argStr = argStr.slice(0, 57) + "...";
+  }
+  return argStr ? `${name}: ${argStr}` : name;
+}
+
+export function summarizeActivity(messages) {
+  if (!Array.isArray(messages)) return [];
+  const lines = [];
+  for (const msg of messages) {
+    const parts = Array.isArray(msg.parts) ? msg.parts : [];
+    for (const part of parts) {
+      if (part && part.type === "tool") {
+        const line = toolPartToLine(part);
+        if (line) lines.push(line);
+      }
+    }
+  }
+  return lines.length <= 10 ? lines : lines.slice(-10);
+}

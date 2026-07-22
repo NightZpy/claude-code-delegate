@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-22
+
+### Added
+- Global mode dimension in the usage TUI: press `g` to scope every tab (Overview/Details/Health/Quotas/Analyze) to all/text/agentic, shown as a prominent `mode: [ all ] · text · agentic` badge; empty scopes say "no <mode> delegations yet" instead of a blank table.
+- `watch <jobId>`: live `tail -f`-style view of a running job — for agentic jobs it streams the model's tool activity (files read, commands run, edits) polled from the OpenCode session; falls back to the job log. `status` shows recent agentic activity inline.
+
 ## [0.9.1] - 2026-07-22
 
 ### Changed
