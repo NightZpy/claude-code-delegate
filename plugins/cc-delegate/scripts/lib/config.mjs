@@ -9,9 +9,10 @@ export async function loadConfig() {
     const text = await fs.readFile(CONFIG_FILE, "utf8");
     const parsed = JSON.parse(text);
     const quotas = parsed && typeof parsed.quotas === "object" && parsed.quotas !== null ? parsed.quotas : {};
-    return { quotas };
+    const reviewGate = parsed && typeof parsed.reviewGate === "string" ? parsed.reviewGate : "off";
+    return { quotas, reviewGate };
   } catch {
-    return { quotas: {} };
+    return { quotas: {}, reviewGate: "off" };
   }
 }
 

@@ -6,6 +6,9 @@ A [Claude Code](https://claude.com/claude-code) plugin marketplace. Its one plug
 
 ## Why
 
+
+Where the codex plugin delegates to one model, cc-delegate operates a delegation *fleet* with cost accounting, health monitoring, spend quotas, circuit-breaker failover, a context-window guard, and an optional review gate — everything an orchestrator needs to delegate fully and safely.
+
 Token economics. In a planner/executor split, the planner (Claude) reads the repo, makes decisions, and reviews results — that's where the expensive context belongs. The executor just turns a well-specified brief into code or a diff, and that job doesn't need a frontier-tier model to do it well. The models in the matrix below are 10-1000x cheaper per token than Claude and, for bounded generation tasks, close the gap. One real logged delegation — a code-writing request routed to the cheapest model in the fleet — cost **$0.000013**. Keeping the planner on Claude and pushing bulk generation onto cheaper external models cuts the cost of large or repetitive tasks without touching the quality of the parts that actually require judgment.
 
 ## Features
@@ -102,6 +105,8 @@ cc-delegate opencode status|stop
 | `/cc-delegate:result` | Fetch a finished background job's output | `/cc-delegate:result <jobId>` |
 | `/cc-delegate:cancel` | Cancel a running background job | `/cc-delegate:cancel <jobId>` |
 | `/cc-delegate:usage` | Show aggregated token and cost usage (`--details` for per-request rows, `--health` for reliability) | `/cc-delegate:usage --days 7 --model qwen --session current` |
+| `/cc-delegate:review` | Delegated correctness review of the working-tree diff (structured verdict) | `/cc-delegate:review "focus on the parser"` |
+| `/cc-delegate:adversarial-review` | Adversarial review — actively tries to break the change | `/cc-delegate:adversarial-review` |
 | `/cc-delegate:analyze` | Feed usage/details/health JSON to a subagent for cost and health recommendations | `/cc-delegate:analyze --days 7` |
 | `/cc-delegate:setup` | Check readiness (keys present, providers reachable) | `/cc-delegate:setup` |
 

@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-22
+
+### Added
+- **Review suite**: `review [--adversarial] [--model]` delegates a working-tree diff review returning a structured JSON verdict (schema + prompt templates); `/cc-delegate:review` and `/cc-delegate:adversarial-review` commands.
+- **Review gate**: `gate <off|warn|enforce|status>` + Stop hook — with `enforce`, Claude can't finish while uncommitted changes fail a delegated review (fail-open on any error).
+- Mode-aware TUI: Details tab filters by mode ('m' key), Health/Quotas/Analyze split text vs agentic spend.
+- SessionEnd hook: sweeps orphaned running/queued jobs from ended Claude sessions.
+
 ## [0.8.1] - 2026-07-22
 
 ### Added

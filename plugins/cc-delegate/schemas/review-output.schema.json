@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Review Output",
+  "description": "Structured review verdict returned by the review subcommand.",
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-line summary of the review outcome."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["P1", "P2", "P3"]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "issue": {
+            "type": "string"
+          },
+          "fix": {
+            "type": "string"
+          }
+        },
+        "required": ["severity", "file", "line", "issue", "fix"]
+      }
+    }
+  },
+  "required": ["verdict", "summary", "findings"],
+  "additionalProperties": false
+}

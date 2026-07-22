@@ -16,7 +16,7 @@ import {
   loadKeys,
   maskKey,
 } from "./lib/env.mjs";
-import { loadConfig } from "./lib/config.mjs";
+import { loadConfig, saveConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import {
   checkServerHealth,
@@ -528,7 +528,7 @@ function buildDetailsView(limited, styles) {
 
 // Builds the human-readable Health body (no trailing newline). `advisories`
 // is the array from listActiveAdvisories: [{alias, provider, advisory}].
-function buildHealthView(normalized, modelStats, providerStats, warnings, styles, advisories = []) {
+function buildHealthView(normalized, modelStats, providerStats, warnings, styles, advisories = [], agenticModelStats = null, agenticProviderStats = null) {
   if (!normalized.length) {
     return "no usage recorded yet";
   }
@@ -541,13 +541,26 @@ function buildHealthView(normalized, modelStats, providerStats, warnings, styles
     colored[4] = colorByP95Latency(cells[4], row.raw.p95LatencyMs, styles);
     return colored;
   };
+
+  const sections = [];
+
+  // Text-only tables (or all if no agentic data)
+  const modelTitle = agenticModelStats ? "By model (text)" : "By model";
+  const providerTitle = agenticProviderStats ? "By provider (text)" : "By provider";
   const modelTable = renderTable(headers, toRows(modelStats), styles, colorRow);
   const providerTable = renderTable(headers, toRows(providerStats), styles, colorRow);
+  sections.push(`${sectionTitle(modelTitle, styles)}\n${modelTable}`);
+  sections.push(`${sectionTitle(providerTitle, styles)}\n${providerTable}`);
 
-  const sections = [
-    `${sectionTitle("By model", styles)}\n${modelTable}`,
-    `${sectionTitle("By provider", styles)}\n${providerTable}`,
-  ];
+  if (agenticModelStats && agenticModelStats.length > 0) {
+    const agenticModelTable = renderTable(headers, toRows(agenticModelStats), styles, colorRow);
+    sections.push(`${sectionTitle("By model (agentic)", styles)}\n${agenticModelTable}`);
+  }
+  if (agenticProviderStats && agenticProviderStats.length > 0) {
+    const agenticProviderTable = renderTable(headers, toRows(agenticProviderStats), styles, colorRow);
+    sections.push(`${sectionTitle("By provider (agentic)", styles)}\n${agenticProviderTable}`);
+  }
+
   if (warnings.length) {
     sections.push(warnings.map((warning) => styles.yellow(warning)).join("\n"));
   }
@@ -560,9 +573,10 @@ function buildHealthView(normalized, modelStats, providerStats, warnings, styles
   return sections.join("\n\n");
 }
 
+
 // Builds the human-readable Quotas body (no trailing newline). Used by the
 // TUI's Quotas tab; the static `usage` overview embeds the same section.
-function buildQuotasView(config, entries, styles) {
+async function buildQuotasView(config, entries, styles) {
   const quotaSection = buildQuotaSection(config, entries, styles);
   if (!quotaSection) {
     return [
@@ -570,20 +584,50 @@ function buildQuotasView(config, entries, styles) {
       styles.dim("Set a monthly USD quota per provider: run `cc-delegate-keys` and answer the quota prompt."),
     ].join("\n\n");
   }
-  const sections = [`${sectionTitle("Quotas (this month)", styles)}\n${quotaSection.rows.join("\n")}`];
+
+  const monthKey = currentMonthKey();
+  const monthEntries = entries.filter(entry => currentMonthKey(new Date(entry.ts)) === monthKey);
+  const providers = Object.keys(config.quotas || {});
+  const rowsWithSplit = [];
+  for (const row of quotaSection.rows) {
+    rowsWithSplit.push(row);
+    const provider = providers.find(p => row.startsWith(`${p}:`));
+    if (provider) {
+      const agenticCost = monthEntries
+        .filter(e => e.provider === provider && (e.mode || "text") === "agentic")
+        .reduce((sum, e) => sum + Number(e.cost || 0), 0);
+      if (agenticCost > 0) {
+        const textCost = monthEntries
+          .filter(e => e.provider === provider && (e.mode || "text") === "text")
+          .reduce((sum, e) => sum + Number(e.cost || 0), 0);
+        rowsWithSplit.push(
+          `  ${styles.dim(`text ${formatUsd(textCost)} · agentic ${formatUsd(agenticCost)} this month`)}`
+        );
+      }
+    }
+  }
+
+  const sections = [`${sectionTitle("Quotas (this month)", styles)}\n${rowsWithSplit.join("\n")}`];
   if (quotaSection.alerts.length) {
     sections.push(quotaSection.alerts.join("\n"));
   }
   return sections.join("\n\n");
 }
 
+
 const USAGE_TABS = ["Overview", "Details", "Health", "Quotas", "Analyze"];
 
-function buildTabBar(activeIndex) {
-  return USAGE_TABS.map((name, index) => (index === activeIndex ? `\x1b[7m ${name} \x1b[0m` : ` ${name} `)).join(
-    "│",
-  );
+function buildTabBar(activeIndex, detailsLabel = null) {
+  const names = USAGE_TABS.map((name, index) => {
+    let display = name;
+    if (index === 1 && detailsLabel) {
+      display = `${name}·${detailsLabel}`;
+    }
+    return index === activeIndex ? `\x1b[7m ${display} \x1b[0m` : ` ${display} `;
+  });
+  return names.join("│");
 }
+
 
 // Builds the human-readable Analyze body (no trailing newline). Static,
 // informative content: it points to `/cc-delegate:analyze` (the actual AI
@@ -599,7 +643,7 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
     .filter((entry) => currentMonthKey(new Date(entry.ts)) === monthKey)
     .reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
 
-  // Top model by SPEND, not job count — job counts tie easily and mislead.
+  // Top model by spend
   const modelSpend = {};
   for (const entry of filtered) {
     const model = String(entry.model || "unknown");
@@ -616,7 +660,20 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
     ? `${topModelEntry[0]} (${formatUsd(topModelEntry[1].cost)}, ${topModelEntry[1].jobs} job${topModelEntry[1].jobs === 1 ? "" : "s"})`
     : "-";
 
-  const summaryLines = [`spend this month: ${formatUsd(monthCost)}`, `top model by spend: ${topModel}`];
+  // byMode split for this month (all entries)
+  const textCost = entries
+    .filter(e => currentMonthKey(new Date(e.ts)) === monthKey && (e.mode || "text") === "text")
+    .reduce((sum, e) => sum + Number(e.cost || 0), 0);
+  const agenticCost = entries
+    .filter(e => currentMonthKey(new Date(e.ts)) === monthKey && (e.mode || "text") === "agentic")
+    .reduce((sum, e) => sum + Number(e.cost || 0), 0);
+  const byModeLine = `by mode: text ${formatUsd(textCost)} · agentic ${formatUsd(agenticCost)} this month`;
+
+  const summaryLines = [
+    `spend this month: ${formatUsd(monthCost)}`,
+    byModeLine,
+    `top model by spend: ${topModel}`,
+  ];
   if (warnings.length || activeAdvisories.length) {
     summaryLines.push("active alerts:");
     for (const warning of warnings) {
@@ -638,6 +695,7 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
   return [title, message, summary, analysisBlock, hint].join("\n\n");
 }
 
+
 function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis) {
   const { filtered, since, sessionFilter, days, sessionError } = resolveLedgerFilter(entries, flags);
 
@@ -655,23 +713,55 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
     const limit = flags.limit !== undefined && Number.isFinite(Number(flags.limit)) ? Number(flags.limit) : 20;
     const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
     const limited = sorted.slice(0, Math.max(0, limit));
+    if (flags.mode === "agentic") {
+      return buildAgenticDetailsView(limited, styles);
+    }
     return buildDetailsView(limited, styles);
   }
 
   const normalized = filtered.map(normalizeLedgerEntry);
-  const modelNames = [...new Set(normalized.map((entry) => String(entry.model || "unknown")))].sort();
-  const providerNamesFromLedger = new Set();
-  for (const entry of normalized) {
-    if (entry.status === "completed" && entry.provider) {
-      providerNamesFromLedger.add(entry.provider);
+  const hasAgentic = normalized.some(e => (e.mode || "text") === "agentic");
+
+  let modelStats, providerStats;
+  let agenticModelStats = null, agenticProviderStats = null;
+
+  if (hasAgentic) {
+    const textNormalized = normalized.filter(e => (e.mode || "text") === "text");
+    const agenticNormalized = normalized.filter(e => (e.mode || "text") === "agentic");
+
+    const textModelNames = [...new Set(textNormalized.map(entry => String(entry.model || "unknown")))].sort();
+    const textProviderNames = new Set();
+    for (const entry of textNormalized) {
+      if (entry.status === "completed" && entry.provider) textProviderNames.add(entry.provider);
+      for (const fp of entry.failedProviders) textProviderNames.add(fp);
     }
-    for (const failedProvider of entry.failedProviders) {
-      providerNamesFromLedger.add(failedProvider);
+    const textProviderArr = [...textProviderNames].sort();
+
+    modelStats = computeGroupStats(textNormalized, textModelNames, entry => String(entry.model || "unknown"));
+    providerStats = computeProviderStats(textNormalized, textProviderArr);
+
+    const agenticModelNames = [...new Set(agenticNormalized.map(entry => String(entry.model || "unknown")))].sort();
+    const agenticProviderNames = new Set();
+    for (const entry of agenticNormalized) {
+      if (entry.status === "completed" && entry.provider) agenticProviderNames.add(entry.provider);
+      for (const fp of entry.failedProviders) agenticProviderNames.add(fp);
     }
+    const agenticProviderArr = [...agenticProviderNames].sort();
+
+    agenticModelStats = computeGroupStats(agenticNormalized, agenticModelNames, entry => String(entry.model || "unknown"));
+    agenticProviderStats = computeProviderStats(agenticNormalized, agenticProviderArr);
+  } else {
+    const modelNames = [...new Set(normalized.map(entry => String(entry.model || "unknown")))].sort();
+    const providerNamesFromLedger = new Set();
+    for (const entry of normalized) {
+      if (entry.status === "completed" && entry.provider) providerNamesFromLedger.add(entry.provider);
+      for (const fp of entry.failedProviders) providerNamesFromLedger.add(fp);
+    }
+    const providerNames = [...providerNamesFromLedger].sort();
+    modelStats = computeGroupStats(normalized, modelNames, entry => String(entry.model || "unknown"));
+    providerStats = computeProviderStats(normalized, providerNames);
   }
-  const providerNames = [...providerNamesFromLedger].sort();
-  const modelStats = computeGroupStats(normalized, modelNames, (entry) => String(entry.model || "unknown"));
-  const providerStats = computeProviderStats(normalized, providerNames);
+
   const warnings = [
     ...buildHealthWarnings(modelStats, "investigate before relying on it further"),
     ...buildHealthWarnings(providerStats, "consider demoting it in models.json"),
@@ -681,9 +771,14 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
   if (tabIndex === 4) {
     return buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAnalysis, styles);
   }
-  return buildHealthView(normalized, modelStats, providerStats, warnings, styles, activeAdvisories);
+  return buildHealthView(normalized, modelStats, providerStats, warnings, styles, activeAdvisories, agenticModelStats, agenticProviderStats);
 }
 
+
+// Interactive tabbed usage viewer. Entered only when stdout/stdin are both
+// TTYs and no view flag (--details/--health/--json) or --static was passed.
+// ponytail: no scroll — content taller than the terminal is truncated with a
+// hint to use the static --details/--limit view instead of building a pager.
 // Interactive tabbed usage viewer. Entered only when stdout/stdin are both
 // TTYs and no view flag (--details/--health/--json) or --static was passed.
 // ponytail: no scroll — content taller than the terminal is truncated with a
@@ -696,14 +791,24 @@ async function runUsageTui(flags) {
   let entries = await readUsageLedger();
   let savedAnalysis = await readSavedAnalysis();
   let activeTab = 0;
+  let detailsMode = "all"; // all | text | agentic
   const wasRaw = Boolean(stdin.isRaw);
   let lastError = null;
 
   function render() {
     const styles = usageStyles();
-    const tabBar = buildTabBar(activeTab);
+    // Update flags.mode for Details tab filtering and view selection
+    if (activeTab === 1 && detailsMode !== "all") {
+      flags.mode = detailsMode;
+    } else if (activeTab === 1) {
+      delete flags.mode;
+    } else {
+      delete flags.mode; // not applicable on other tabs
+    }
+    const detailsLabel = activeTab === 1 && detailsMode !== "all" ? detailsMode : null;
+    const tabBar = buildTabBar(activeTab, detailsLabel);
     const body = buildUsageTabBody(activeTab, entries, flags, config, styles, models, savedAnalysis);
-    const helpLine = styles.dim("←/→ or 1-5 switch view · r reload · q quit");
+    const helpLine = styles.dim("←/→ or 1-5 switch view · r reload · m mode · q quit");
 
     const rows = stdout.rows || 24;
     const maxBodyLines = Math.max(1, rows - 3); // tab bar + blank line + help line
@@ -803,6 +908,15 @@ async function runUsageTui(flags) {
         entries = await readUsageLedger();
         savedAnalysis = await readSavedAnalysis();
         acted = true;
+      } else if (ch === "m" && activeTab === 1) {
+        if (detailsMode === "all") {
+          detailsMode = "text";
+        } else if (detailsMode === "text") {
+          detailsMode = "agentic";
+        } else {
+          detailsMode = "all";
+        }
+        acted = true;
       }
     }
     if (acted && !exiting) {
@@ -847,6 +961,7 @@ async function runUsageTui(flags) {
     throw lastError;
   }
 }
+
 
 // Clip every line to the terminal width before printing so table rows can
 // never wrap in the static (non-TUI) usage views either. No-op when stdout
@@ -2351,12 +2466,97 @@ async function uninstallCommand(flags) {
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
+
+async function loadPromptTemplate(name) {
+  const file = path.join(path.dirname(ENTRYPOINT), "..", "prompts", `${name}.md`);
+  return fs.readFile(file, "utf8");
+}
+
+function parseReviewOutput(rawText) {
+  let text = String(rawText || "").trim();
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fence) {
+    text = fence[1].trim();
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && (parsed.verdict === "pass" || parsed.verdict === "fail")) {
+      return {
+        verdict: parsed.verdict,
+        summary: String(parsed.summary || ""),
+        findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+      };
+    }
+  } catch {
+    // fall through
+  }
+  return { verdict: "fail", summary: "unparseable review output", findings: [], raw: rawText };
+}
+
+// Delegated code review of the working-tree diff. Reuses the text-mode task
+// pipeline with --diff and a schema-constrained system prompt.
+async function reviewCommand(cwd, flags, positionals) {
+  const adversarial = Boolean(flags.adversarial);
+  const model = flags.model || (adversarial ? "glm" : "deepseek");
+  const focus = positionals.join(" ").trim() || "Review the working-tree diff for correctness.";
+  const template = await loadPromptTemplate(adversarial ? "adversarial-review" : "review");
+  const system = template.replace(/\{\{FOCUS\}\}/g, focus);
+
+  const job = await createTaskJob(cwd, { model, diff: true, system }, [focus]);
+  const completed = await runTask(cwd, job);
+  if (completed.status !== "completed") {
+    if (flags.json) {
+      printJson({ verdict: "fail", summary: jobErrorMessage(completed), findings: [] });
+    } else {
+      process.stderr.write(`review failed: ${jobErrorMessage(completed)}\n`);
+    }
+    return 1;
+  }
+
+  const review = parseReviewOutput(completed.result?.content || "");
+  if (flags.json) {
+    printJson(review);
+    return 0;
+  }
+
+  const styles = usageStyles();
+  const banner =
+    review.verdict === "pass"
+      ? styles.green("PASS")
+      : styles.red("FAIL");
+  const lines = [`review (${model}${adversarial ? ", adversarial" : ""}): ${banner}`, review.summary];
+  for (const f of review.findings) {
+    const sev = f.severity || "P?";
+    const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ""}` : "";
+    lines.push(`  ${styles.yellow(sev)} ${loc} — ${f.issue || ""}${f.fix ? `\n     fix: ${f.fix}` : ""}`);
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return review.verdict === "pass" ? 0 : 1;
+}
+
+// Toggle the stop-review-gate: off (default) | warn | enforce | status.
+async function gateCommand(positionals) {
+  const arg = (positionals[0] || "status").toLowerCase();
+  const config = await loadConfig();
+  if (arg === "status") {
+    process.stdout.write(`review gate: ${config.reviewGate || "off"}\n`);
+    return 0;
+  }
+  if (!["off", "warn", "enforce"].includes(arg)) {
+    process.stderr.write("usage: gate <off|warn|enforce|status>\n");
+    return 1;
+  }
+  await saveConfig({ ...config, reviewGate: arg });
+  process.stdout.write(`review gate set to: ${arg}\n`);
+  return 0;
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, opencode, uninstall, link",
+      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, uninstall, link",
     );
   }
 
@@ -2392,6 +2592,12 @@ async function main() {
     case "opencode":
       await opencodeCommand(flags, positionals);
       return 0;
+    case "review":
+      return reviewCommand(cwd, flags, positionals);
+    case "adversarial-review":
+      return reviewCommand(cwd, { ...flags, adversarial: true }, positionals);
+    case "gate":
+      return gateCommand(positionals);
     case "link":
       await linkCommand();
       return 0;
