@@ -166,3 +166,27 @@ export async function callProvider(providerName, modelId, messages, opts = {}) {
     clearTimeout(timeout);
   }
 }
+
+// Best-effort: the real OpenRouter account credit balance (prepaid), which is
+// what actually gates paid calls — our internal ledger quota only knows our own
+// spend, not whether the account can still afford a request. Near/below zero =
+// expensive agentic calls (which reserve ~32k output tokens) will be rejected.
+export async function fetchOpenRouterCredits(apiKey) {
+  if (!apiKey) return null;
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch("https://openrouter.ai/api/v1/credits", {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const d = (await res.json())?.data || {};
+    const credits = Number(d.total_credits || 0);
+    const usage = Number(d.total_usage || 0);
+    return { credits, usage, remaining: Number((credits - usage).toFixed(4)) };
+  } catch {
+    return null;
+  }
+}

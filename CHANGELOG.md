@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-07-22
+
+### Added
+- `setup` now shows the REAL OpenRouter account credit balance (`GET /credits`), not just our internal ledger quota — e.g. `openrouter account credits: $-0.07 remaining ($100.07 of $100.00 used) 🔴 OUT — top up to run paid models`. This is the true gate for paid calls (an exhausted balance is exactly why pricier agentic models, which reserve ~32k output tokens, get rejected while our quota tracker still reads "ok"). Best-effort, additive `openrouterCredits` in `--json`.
+
+### Notes
+- The reported quota-percentage bug (530%/220%) is not present in current code — `setup`/usage render it correctly (5%/2%); a stale cached plugin version showed the old value. `/reload-plugins` resolves it.
 ## [0.13.1] - 2026-07-22
 
 ### Fixed

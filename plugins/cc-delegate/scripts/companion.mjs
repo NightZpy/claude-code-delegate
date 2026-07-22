@@ -34,7 +34,7 @@ import {
   sendMessage,
   stopServer,
 } from "./lib/opencode.mjs";
-import { PROVIDERS, callProvider } from "./lib/providers.mjs";
+import { PROVIDERS, callProvider, fetchOpenRouterCredits } from "./lib/providers.mjs";
 import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
@@ -2077,6 +2077,11 @@ async function setupCommand(flags) {
   const config = await loadConfig();
   const entries = await readUsageLedger();
   const models = await readModelsRegistry();
+  // Real OpenRouter account balance (the true gate for paid calls).
+  let openrouterCredits = null;
+  if (payload.providers.openrouter?.keyPresent) {
+    openrouterCredits = await fetchOpenRouterCredits(keys.values.OPENROUTER_API_KEY);
+  }
   const activeProviders = new Set(getActiveProviders(models));
   for (const [provider, data] of Object.entries(payload.providers)) {
     data.active = activeProviders.has(provider);
@@ -2111,6 +2116,7 @@ async function setupCommand(flags) {
 
   if (flags.json) {
     payload.agentic = { installed: agenticInstalled, version: agenticVersion, serverRunning: agenticServerRunning };
+    if (openrouterCredits) payload.openrouterCredits = openrouterCredits;
     printJson(payload);
     return;
   }
@@ -2134,6 +2140,11 @@ async function setupCommand(flags) {
       line += ` — quota ${formatUsd2(data.quota.monthlyUsd)}/mo, ${formatUsd2(data.quota.spentThisMonth)} spent (${Math.round(data.quota.pct)}%)${icon}`;
     }
     lines.push(line);
+  }
+  if (openrouterCredits) {
+    const r = openrouterCredits.remaining;
+    const flag = r <= 0 ? " 🔴 OUT — top up to run paid models" : r < 1 ? " ⚠ low" : "";
+    lines.push(`openrouter account credits: $${r.toFixed(2)} remaining ($${openrouterCredits.usage.toFixed(2)} of $${openrouterCredits.credits.toFixed(2)} used)${flag}`);
   }
   lines.push(
     agenticServerRunning
