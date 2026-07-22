@@ -49,6 +49,9 @@ async function appendUsageLedger(job) {
     attempts: attempts || 1,
     failedProviders,
     ctxPct: job.ctxPct ?? null,
+    // Additive: agentic rows carry mode:"agentic"; text-mode rows (and all
+    // historical rows) have no field at all, which readers treat as "text".
+    ...(job.mode ? { mode: job.mode } : {}),
   };
 
   try {

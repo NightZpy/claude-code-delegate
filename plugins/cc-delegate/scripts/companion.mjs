@@ -12,11 +12,25 @@ import {
   USAGE_LEDGER_FILE,
   LAST_ANALYSIS_FILE,
   LAST_ANALYSIS_META_FILE,
+  CC_DELEGATE_HOME,
   loadKeys,
   maskKey,
 } from "./lib/env.mjs";
 import { loadConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
+import {
+  checkServerHealth,
+  ensureLeanAgents,
+  createSession,
+  ensureServer,
+  extractText,
+  getOpencodeVersion,
+  isOpencodeInstalled,
+  makeBasicAuth,
+  readServerState,
+  sendMessage,
+  stopServer,
+} from "./lib/opencode.mjs";
 import { PROVIDERS, callProvider } from "./lib/providers.mjs";
 import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
@@ -455,7 +469,7 @@ function buildDetailsView(limited, styles) {
     return "no usage recorded yet";
   }
 
-  const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "CTX%", "STATUS"];
+  const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "CTX%", "STATUS", "MODE"];
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
     const failed = entry.status !== "completed";
@@ -471,6 +485,7 @@ function buildDetailsView(limited, styles) {
         formatLatency(entry.latencyMs),
         entry.ctxPct === null || entry.ctxPct === undefined ? "-" : formatPercent(entry.ctxPct),
         failed ? "failed" : "completed",
+        entry.mode || "text",
       ],
       ctxPct: entry.ctxPct,
       failed,
@@ -1451,6 +1466,125 @@ async function executeTaskRequest(job, models, request, tools) {
   throw new Error(lastError?.message || `all providers failed for model ${selection.alias}`);
 }
 
+// ponytail: opencode's GET /session/:id/diff returned [] for bash-created
+// files in the v1.18.4 spike — git status --porcelain is the source of truth
+// for what a build-mode run actually touched.
+async function listTouchedFiles(cwd) {
+  try {
+    const { stdout } = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd,
+      windowsHide: true,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return stdout
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean);
+  } catch {
+    // ponytail: not a git repo (or git missing) — report no touched files
+    return [];
+  }
+}
+
+// Agentic execution via the OpenCode HTTP server. ponytail: no provider
+// fallback chain in v1 — the FIRST provider of the model's chain is used
+// (today always openrouter); a failure is a failure, no silent reroute.
+async function executeAgenticTaskRequest(job, models, request, tools) {
+  const selection = resolveModelSelection(models, request.model, request.provider);
+  const candidate = selection.providers[0];
+  const agent = request.write ? "cc-build" : "cc-plan";
+
+  if (request.opencodeSessionId) {
+    await tools.log(
+      `resuming opencode session ${request.opencodeSessionId} from job ${job.resumedFrom} (native continuity, no conversation replay)`,
+    );
+  }
+
+  // Context guard on the packed prompt text (files/diff already inlined by
+  // createTaskJob). ponytail: the ~14k-token agentic harness overhead per
+  // message is NOT counted here — the guard measures only the payload.
+  const contextGuard = evaluateContextWindow(models, selection.alias, [
+    { role: "user", content: request.prompt },
+  ]);
+  await tools.setJob({ ctxPct: contextGuard.ctxPct });
+  if (contextGuard.exceeded) {
+    await tools.setJob({ contextExceeded: true });
+    throw new Error(contextGuard.failMessage);
+  }
+
+  const providerConfig = PROVIDERS[candidate.name];
+  if (providerConfig?.envKey && !process.env[providerConfig.envKey]) {
+    const setupScript = path.join(path.dirname(ENTRYPOINT), "setup-keys.mjs");
+    throw new Error(
+      `no API key configured for provider ${candidate.name} of model ${selection.alias} (agentic mode uses the first provider only). ` +
+        `Configure keys: in Claude Code type \`! cc-delegate-keys\`, or run in your terminal:\n` +
+        `  node "${setupScript}"`,
+    );
+  }
+
+  await tools.log(`ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`);
+  const wroteLeanAgents = await ensureLeanAgents();
+  if (wroteLeanAgents) {
+    // New agent definitions only load at server start — restart if running.
+    try { await stopServer(CC_DELEGATE_HOME); } catch {}
+  }
+  const server = await ensureServer(CC_DELEGATE_HOME);
+
+  let sessionId = request.opencodeSessionId || null;
+  if (!sessionId) {
+    const session = await createSession(server);
+    sessionId = session.id;
+    await tools.log(`created opencode session ${sessionId}`);
+  }
+  await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
+
+  const callStartedAt = Date.now();
+  const response = await sendMessage(server, sessionId, {
+    text: request.prompt,
+    agent,
+    model: { providerID: candidate.name, modelID: candidate.id },
+    timeoutMs: selection.timeoutMs || 600000,
+  });
+  const latencyMs = Date.now() - callStartedAt;
+  const { text, tokens, cost, modelID, providerID } = extractText(response);
+  const usage = {
+    prompt_tokens: tokens.input,
+    completion_tokens: tokens.output + tokens.reasoning,
+    total_tokens: tokens.input + tokens.output + tokens.reasoning,
+  };
+
+  let touchedFiles = [];
+  let content = text;
+  if (agent === "cc-build") {
+    touchedFiles = await listTouchedFiles(job.cwd);
+    content = `${text}\n\ntouched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`;
+    await tools.log(`touched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`);
+  }
+
+  return {
+    provider: providerID || candidate.name,
+    attempts: [],
+    usage,
+    // info.cost is the actual billed number — registry pricing math would be
+    // wrong here because the agentic harness inflates input tokens (~14k/msg).
+    cost,
+    latencyMs,
+    ctxPct: contextGuard.ctxPct,
+    contextAdvisory: contextGuard.advisoryLine,
+    mode: "agentic",
+    agent,
+    opencodeSessionId: sessionId,
+    result: {
+      content,
+      raw: response,
+      modelId: modelID || candidate.id,
+      alias: selection.alias,
+      provider: providerID || candidate.name,
+      touchedFiles,
+    },
+  };
+}
+
 function summarizeJobForOutput(job, progressPreview) {
   const startedAt = job.createdAt;
   const endedAt = job.completedAt || job.cancelledAt || job.updatedAt;
@@ -1465,6 +1599,8 @@ function summarizeJobForOutput(job, progressPreview) {
     pid: job.pid,
     model: job.model,
     provider: job.provider,
+    mode: job.mode || "text",
+    agent: job.agent || null,
     tokens: job.usage,
     cost: job.cost,
     error: job.error,
@@ -1561,7 +1697,30 @@ async function setupCommand(flags) {
     data.quota = computeQuotaStatus(provider, monthlyUsd, entries);
   }
 
+
+  // --- Agentic (OpenCode) detection ---
+  let agenticInstalled = false;
+  let agenticVersion = null;
+  let agenticServerRunning = false;
+  try {
+    agenticInstalled = await isOpencodeInstalled();
+    if (agenticInstalled) {
+      agenticVersion = await getOpencodeVersion();
+      try {
+        const ocState = await readServerState(CC_DELEGATE_HOME);
+        if (ocState) {
+          agenticServerRunning = await checkServerHealth({ base: ocState.base, auth: makeBasicAuth(ocState.password) });
+        }
+      } catch {
+        // probe failed - server not running
+      }
+    }
+  } catch {
+    // detection failed - treat as not installed
+  }
+
   if (flags.json) {
+    payload.agentic = { installed: agenticInstalled, version: agenticVersion, serverRunning: agenticServerRunning };
     printJson(payload);
     return;
   }
@@ -1586,6 +1745,13 @@ async function setupCommand(flags) {
     }
     lines.push(line);
   }
+  lines.push(
+    agenticServerRunning
+      ? `agentic: opencode ${agenticVersion} — running (server up)`
+      : agenticInstalled
+        ? `agentic: opencode ${agenticVersion} — ready`
+        : "agentic: not installed — npm i -g opencode-ai to enable",
+  );
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
@@ -1615,6 +1781,14 @@ async function modelsCommand(flags) {
 }
 
 async function createTaskJob(cwd, flags, positionals) {
+  // Fail fast before any prompt/provider/key work: agentic mode is useless
+  // without the OpenCode CLI, and the install hint is actionable immediately.
+  if (flags.agentic && !(await isOpencodeInstalled())) {
+    throw new Error(
+      "agentic mode requires the OpenCode CLI. Install: npm i -g opencode-ai (or brew install opencode), then re-run.",
+    );
+  }
+
   const prompt = await readPrompt(flags, positionals);
   const fileBlocks = await readFileAttachments(cwd, asArray(flags.file));
   const diffBlock = flags.diff ? await readGitDiff(cwd) : null;
@@ -1623,6 +1797,7 @@ async function createTaskJob(cwd, flags, positionals) {
   let model = String(flags.model || "qwen");
   let resumedFrom = null;
   let conversationSeed = null;
+  let opencodeSessionId = null;
   let modelMismatchWarning = null;
 
   if (flags.resume !== undefined) {
@@ -1636,7 +1811,13 @@ async function createTaskJob(cwd, flags, positionals) {
         `--model ${model} differs from base job ${baseJob.id}'s model ${baseJob.model} — resuming without history`;
     } else {
       model = baseJob.model;
-      conversationSeed = getBaseConversation(baseJob);
+      if (flags.agentic) {
+        // Native session continuity: the opencode server already holds the
+        // thread — no conversation replay in agentic mode.
+        opencodeSessionId = baseJob.opencodeSessionId || null;
+      } else {
+        conversationSeed = getBaseConversation(baseJob);
+      }
     }
   }
 
@@ -1647,6 +1828,9 @@ async function createTaskJob(cwd, flags, positionals) {
     maxTokens: flags["max-tokens"] !== undefined ? Number(flags["max-tokens"]) : undefined,
     prompt: userPrompt,
     conversationSeed,
+    agentic: Boolean(flags.agentic),
+    write: Boolean(flags.write),
+    opencodeSessionId,
   };
 
   const job = await createJob(cwd, {
@@ -1744,8 +1928,10 @@ async function runTask(cwd, job) {
   await loadKeys();
   const models = await readModelsRegistry();
   const completed = await runTrackedJob(cwd, job.id, async (tools) => {
-    const outcome = await executeTaskRequest(job, models, job.request, tools);
-    return outcome;
+    if (job.request?.agentic) {
+      return executeAgenticTaskRequest(job, models, job.request, tools);
+    }
+    return executeTaskRequest(job, models, job.request, tools);
   });
   const withQuota = await attachQuotaAlert(cwd, completed);
   return attachHealthAdvisory(cwd, withQuota);
@@ -1800,6 +1986,9 @@ async function statusCommand(cwd, flags, positionals) {
   const lines = [];
   if (jobId) {
     lines.push(`${payload.id} ${payload.status} elapsed=${payload.elapsedMs}ms`);
+    if (payload.mode === "agentic") {
+      lines.push(`mode: agentic agent=${payload.agent || "plan"}`);
+    }
     if (payload.resumedFrom) {
       lines.push(`resumed from ${payload.resumedFrom}`);
     }
@@ -1834,10 +2023,13 @@ async function resultCommand(cwd, flags, positionals) {
     model: job.result?.alias || job.model,
     modelId: job.result?.modelId || null,
     provider: job.result?.provider || job.provider,
+    mode: job.mode || null,
+    agent: job.agent || null,
     usage: job.usage,
     cost: job.cost,
     error: job.error,
     output: job.result?.content || null,
+    touchedFiles: job.result?.touchedFiles || null,
     quota: job.quota || null,
     advisory: job.advisory || null,
     contextAdvisory: job.contextAdvisory || null,
@@ -1990,12 +2182,93 @@ async function analysisCommand(flags, positionals) {
   throw new Error("analysis requires a subcommand: save, show");
 }
 
+async function opencodeCommand(flags, positionals) {
+  const sub = positionals[0];
+
+  if (sub === "status") {
+    const installed = await isOpencodeInstalled();
+    const version = installed ? await getOpencodeVersion() : null;
+    const serverState = await readServerState(CC_DELEGATE_HOME);
+    let healthy = false;
+    if (serverState) {
+      healthy = await checkServerHealth({
+        base: serverState.base,
+        auth: makeBasicAuth(serverState.password),
+      });
+    }
+
+    const payload = {
+      installed,
+      version,
+      server: serverState
+        ? { pid: serverState.pid, port: serverState.port, healthy }
+        : null,
+    };
+    if (flags.json) {
+      printJson(payload);
+      return;
+    }
+
+    const lines = [`installed: ${installed ? "yes" : "no"}`];
+    if (version) {
+      lines.push(`version: ${version}`);
+    }
+    if (serverState) {
+      lines.push(`server: pid ${serverState.pid} port ${serverState.port} — ${healthy ? "healthy" : "not responding"}`);
+    } else {
+      lines.push("server: not running");
+    }
+    process.stdout.write(`${lines.join("\n")}\n`);
+    return;
+  }
+
+  if (sub === "stop") {
+    const stopped = await stopServer(CC_DELEGATE_HOME);
+    process.stdout.write(stopped ? "stopped\n" : "no server running\n");
+    return;
+  }
+
+  throw new Error("opencode requires a subcommand: status, stop");
+}
+
+
+async function uninstallCommand(flags) {
+  const lines = [];
+  try {
+    await stopServer(CC_DELEGATE_HOME);
+    lines.push("opencode server stopped (if it was running).");
+  } catch {
+    lines.push("opencode server: nothing to stop.");
+  }
+  const binDir = path.join(os.homedir(), ".local", "bin");
+  for (const name of ["cc-delegate", "cc-delegate-keys"]) {
+    try {
+      await fs.unlink(path.join(binDir, name));
+      lines.push(`removed ${path.join(binDir, name)}`);
+    } catch {
+      // not linked — fine
+    }
+  }
+  if (flags.purge) {
+    await fs.rm(CC_DELEGATE_HOME, { recursive: true, force: true });
+    lines.push(`purged ${CC_DELEGATE_HOME} (keys, ledger, saved analyses).`);
+    for (const agentName of ["cc-plan.md", "cc-build.md"]) {
+      try { await fs.unlink(path.join(os.homedir(), ".config", "opencode", "agent", agentName)); } catch {}
+    }
+    lines.push("removed lean agent definitions from ~/.config/opencode/agent/.");
+  } else {
+    lines.push(`state kept at ${CC_DELEGATE_HOME} (use --purge to delete keys/ledger).`);
+  }
+  lines.push('Finish with: /plugin uninstall cc-delegate@claude-code-delegate');
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, link",
+      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, opencode, uninstall, link",
     );
   }
 
@@ -2024,6 +2297,12 @@ async function main() {
       return 0;
     case "analysis":
       await analysisCommand(flags, positionals);
+      return 0;
+    case "uninstall":
+      await uninstallCommand(flags);
+      return 0;
+    case "opencode":
+      await opencodeCommand(flags, positionals);
       return 0;
     case "link":
       await linkCommand();

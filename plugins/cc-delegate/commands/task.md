@@ -1,6 +1,6 @@
 ---
 description: Delegate a bounded coding sub-task to an external frontier model via the runner subagent
-argument-hint: '[--model qwen|kimi|deepseek|glm] [--provider openrouter|siliconflow|deepinfra|cerebras] [--background] <brief>'
+argument-hint: '[--model qwen|deepseek|deepseek-pro|glm|kimi|kimi-fast|grok] [--provider openrouter|siliconflow] [--background] [--agentic] [--write] <brief>'
 allowed-tools: Agent
 ---
 

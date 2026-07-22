@@ -94,6 +94,11 @@ async function readSseStream(response, providerName) {
       `stream from ${providerName} ended prematurely after ${content.length} chars: ${toErrorMessage(error)}`,
     );
   }
+  if (!content && !usage) {
+    // ponytail: an empty stream with no usage is an upstream failure that ended
+    // cleanly at the SSE level — surface it so the fallback chain can act.
+    throw new Error(`empty response from ${providerName} (stream closed with no content)`);
+  }
 
   return {
     id,

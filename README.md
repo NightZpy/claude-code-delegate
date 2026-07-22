@@ -10,6 +10,7 @@ Token economics. In a planner/executor split, the planner (Claude) reads the rep
 
 ## Features
 
+- **Agentic mode** — `task --agentic [--write]` runs the delegate on an OpenCode-backed harness with real tools (read files, run commands, apply edits) in the working tree.
 - **Model fleet with provider fallback chains** — six models, each mapped to one or more providers; a failing provider falls through to the next one that serves that model.
 - **Background jobs** — detached processes with disk-persisted state, so `status`/`result`/`cancel` work from a later, unrelated Claude Code turn.
 - **Usage ledger + interactive tabbed TUI** — `Overview` / `Details` / `Health` / `Quotas` / `Analyze` tabs; `←`/`→` or `1`-`5` to switch, `r` to reload, `q`/Esc/Ctrl-C to exit.
@@ -52,6 +53,37 @@ Data from research as of July 2026.
 | `kimi` | Kimi K3 (`moonshotai/kimi-k3`) | Long-context auditing, deep reasoning | 1M | $3.00 / $15.00 | 5 | ~Opus 4.8 / GPT-5.5 | Artificial Analysis Index 57 (#4 global); expensive, slow (34 tok/s), always-on thinking is billed, frequent 429s |
 
 **Benchmark caveat:** most of the vendor-reported SWE-bench figures above 75% for these models are self-reported and not confirmed on neutral leaderboards. The only independently verified number here is GLM-5.2's SWE-bench Pro result (62.1%, morphllm-verified).
+
+## Agentic mode
+
+Text mode (the default) is prompt in, text out — the external model has no tools. Agentic mode runs the delegate on an OpenCode-backed harness with real tools in the working tree, for steps that genuinely need repo access or command execution.
+
+Requires the `opencode` CLI:
+
+`cc-delegate setup` reports whether `opencode` is available; a missing binary fails with an error explaining the install.
+
+Examples:
+
+When to use:
+
+| Use text mode (default) | Use agentic mode |
+|---|---|
+| Boilerplate, codegen, test writing | Step must read files across the repo |
+| Diff review, long-context analysis | Step must run commands (tests, linters, builds) |
+| Anything a self-contained brief can carry | Step must apply edits to the working tree (`--write`) |
+
+Rules of thumb: never use agentic mode for trivial generation; keep it read-only unless edits are wanted. Agentic runs are read-only by default — `--write` enables file edits.
+
+Cost: the agentic harness adds ~13-14k input tokens of overhead per call — roughly 100x a text call. Ledger rows record agentic runs as `mode: "agentic"` with the actual billed cost, so `cc-delegate usage --details` shows exactly what each run spent.
+
+Sessions: agentic `--resume` reuses the native OpenCode session, so follow-ups keep full tool-call history.
+
+Manage the OpenCode backend directly with:
+
+```
+cc-delegate opencode status|stop
+```
+
 
 ## Commands
 
@@ -163,10 +195,30 @@ The [`plan-big-execute-small`](https://github.com/NightZpy/claude-skills/blob/ma
 
 ## Roadmap
 
-- Agentic loop: give the external model bounded tool access instead of text-in/text-out.
 - Streaming output for foreground tasks.
 - Cache-aware costing: several providers already report `cachedInput` pricing in the model registry; the runtime doesn't yet use it to discount repeat-context requests.
 - Dynamic, price-aware provider ordering instead of a fixed fallback chain.
+
+## Command Mapping (codex-plugin-cc → cc-delegate)
+
+Users migrating from [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) can use this table to find the cc-delegate equivalent.
+
+| codex‑plugin‑cc | cc‑delegate | Notes |
+|---|---|---|
+| `/codex:rescue` | `/cc-delegate:task` | General delegation; use `--model <alias>` for a specific external model. |
+| `/codex:status` | `/cc-delegate:status` | Same behaviour — shows running/recent jobs. |
+| `/codex:result` | `/cc-delegate:result` | Same — fetch finished job output. |
+| `/codex:cancel` | `/cc-delegate:cancel` | Same — cancel a running job. |
+| `/codex:setup` | `/cc-delegate:setup` | Checks readiness; we check keys & connectivity instead of OpenCode server. |
+| `/codex:review` | *No direct equivalent* | Use `/cc-delegate:task --system "Review the following diff for bugs" --diff` with a model like `deepseek`. |
+| `/codex:adversarial-review` | *No direct equivalent* | Use `/cc-delegate:task --system "Act as an adversarial reviewer..." --diff` with `glm` or `grok`. |
+
+> **Note:** codex‑plugin‑cc’s `/codex:rescue` delegates to Codex (OpenAI). Our `/cc-delegate:task` delegates to the external model of your choice. The core pattern (forward prompt, return output) is identical.
+
+### Uninstall
+
+1. `/plugin uninstall cc-delegate@claude-code-delegate`
+2. Optional cleanup from your terminal: `cc-delegate uninstall` (stops the OpenCode server and removes the `~/.local/bin` wrappers; add `--purge` to also delete `~/.claude/cc-delegate` — keys, ledger and saved analyses).
 
 ## Contributing
 

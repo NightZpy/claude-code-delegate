@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-22
+
+### Added
+- **Agentic mode**: `task --agentic [--write]` runs delegates on a local OpenCode server with real tools (read/edit files, run commands); per-task model selection, native session resume, `touched files` reporting via git, ledger rows with `mode: agentic` and actual billed cost. Requires the opencode CLI (`npm i -g opencode-ai`).
+- Lean `cc-plan`/`cc-build` agents (~27% less harness overhead than stock opencode agents; measured 12,969 → 9,464 input tokens).
+- `opencode status|stop` and `uninstall [--purge]` subcommands; setup reports agentic availability; MODE column in `usage --details`; codex→cc-delegate command-mapping docs.
+
+### Fixed
+- Review fixes: touched-files agent check, authenticated health probes, foreign-server guard via raw probe (401-aware), stop-before-state-removal ordering, ensure lock against concurrent spawns, lean-agent content updates on upgrade, cross-cwd agentic resume refused, purge removes lean agents, empty-stream guard in providers, state file written 0600.
+
 ## [0.7.1] - 2026-07-21
 
 ### Added
