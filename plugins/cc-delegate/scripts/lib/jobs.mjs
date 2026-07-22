@@ -52,6 +52,18 @@ async function appendUsageLedger(job) {
     // Additive: agentic rows carry mode:"agentic"; text-mode rows (and all
     // historical rows) have no field at all, which readers treat as "text".
     ...(job.mode ? { mode: job.mode } : {}),
+    // Agentic additive fields — absent for non-agentic rows (zeroes and nulls
+    // would bloat the ledger for text-mode traffic, which never applies).
+    ...(job.mode === "agentic"
+      ? {
+          reasoningTokens: Number(job.reasoningTokens || 0),
+          cacheRead: Number(job.cacheRead || 0),
+          cacheWrite: Number(job.cacheWrite || 0),
+          toolCalls: Number(job.toolCalls || 0),
+          agent: job.agent || null,
+          touchedCount: job.touchedCount ?? null,
+        }
+      : {}),
   };
 
   try {
@@ -61,6 +73,7 @@ async function appendUsageLedger(job) {
     // ponytail: ledger write failures must never fail the delegated task
   }
 }
+
 
 export async function runTrackedJob(cwd, jobId, runner) {
   await updateJob(cwd, jobId, {

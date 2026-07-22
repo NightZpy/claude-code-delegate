@@ -271,6 +271,7 @@ function resolveLedgerFilter(entries, flags) {
   const modelFilter = typeof flags.model === "string" ? flags.model : null;
   const providerFilter = typeof flags.provider === "string" ? flags.provider : null;
   const sessionFilterRaw = flags.session;
+  const modeFilter = typeof flags.mode === "string" ? flags.mode : null;
   const days = flags.days !== undefined ? Number(flags.days) : null;
   const since =
     days !== null && Number.isFinite(days) && days >= 0
@@ -307,11 +308,18 @@ function resolveLedgerFilter(entries, flags) {
     if (since && Date.parse(entry.ts) < since.getTime()) {
       return false;
     }
+    if (modeFilter) {
+      const entryMode = entry.mode || "text";
+      if (entryMode !== modeFilter) {
+        return false;
+      }
+    }
     return true;
   });
 
   return { filtered, since, sessionFilter, days, sessionError: null };
 }
+
 
 function normalizeLedgerEntry(entry) {
   return {
@@ -442,9 +450,19 @@ function buildOverviewView(filtered, filterInfo, styles, quotaSection) {
     return `${formatSessionLabel(sessionId)}${current}`;
   });
 
+  const agenticEntries = filtered.filter((entry) => (entry.mode || "text") === "agentic");
+  let agenticLine = null;
+  if (agenticEntries.length > 0) {
+    const agenticCost = agenticEntries.reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
+    const textEntries = filtered.filter((entry) => (entry.mode || "text") === "text");
+    const textCost = textEntries.reduce((sum, entry) => sum + Number(entry.cost || 0), 0);
+    agenticLine = `  ${styles.dim("agentic spend:")} ${formatUsd(agenticCost)} across ${agenticEntries.length} call${agenticEntries.length === 1 ? "" : "s"} (text: ${formatUsd(textCost)} / ${textEntries.length} calls)`;
+  }
+
   const sections = [
     sectionTitle(`cc-delegate usage — ${scope}`, styles),
     summary.join("\n"),
+    ...(agenticLine ? [agenticLine] : []),
     `${sectionTitle("By model", styles)}\n${modelRows.join("\n")}`,
     `${sectionTitle("By provider", styles)}\n${providerRows.join("\n")}`,
     `${sectionTitle("By session", styles)}\n${sessionRows.join("\n")}`,
@@ -864,10 +882,20 @@ async function usageCommand(flags) {
   const config = await loadConfig();
 
   if (flags.json) {
+  const byMode = { text: { jobs: 0, cost: 0 }, agentic: { jobs: 0, cost: 0 } };
+  for (const entry of filtered) {
+    const bucket = (entry.mode || "text") === "agentic" ? byMode.agentic : byMode.text;
+    bucket.jobs += 1;
+    bucket.cost += Number(entry.cost || 0);
+  }
+  byMode.text.cost = Number(byMode.text.cost.toFixed(6));
+  byMode.agentic.cost = Number(byMode.agentic.cost.toFixed(6));
+
     const payload = {
       ...aggregateUsage(filtered),
       since: since ? since.toISOString() : null,
     };
+    payload.byMode = byMode;
     for (const [provider, monthlyUsd] of Object.entries(config.quotas)) {
       const quota = computeQuotaStatus(provider, monthlyUsd, entries);
       if (!quota) {
@@ -893,6 +921,55 @@ async function usageCommand(flags) {
   writeClippedToStdout(view);
 }
 
+function buildAgenticDetailsView(limited, styles) {
+  if (!limited.length) {
+    return "no agentic usage recorded yet";
+  }
+
+  const headers = ["TIME", "JOB", "MODEL", "AGENT", "IN", "REASON", "OUT", "CACHE-R", "TOOLS", "FILES", "COST", "LATENCY", "STATUS"];
+  const rows = limited.map((raw) => {
+    const entry = normalizeLedgerEntry(raw);
+    const failed = entry.status !== "completed";
+    const agent = entry.agent || "-";
+    const reasoning = entry.reasoningTokens ? formatCompactNumber(entry.reasoningTokens) : "-";
+    const cacheRead = entry.cacheRead ? formatCompactNumber(entry.cacheRead) : "-";
+    const tools = entry.toolCalls !== undefined ? entry.toolCalls : "-";
+    const touchedText =
+      entry.touchedCount === null || entry.touchedCount === undefined ? "-" : entry.touchedCount;
+    const row = {
+      cells: [
+        formatRelativeTime(entry.ts),
+        formatJobIdShort(entry.jobId),
+        String(entry.model || "-"),
+        agent,
+        formatCompactNumber(entry.promptTokens),
+        reasoning,
+        formatCompactNumber(entry.completionTokens),
+        cacheRead,
+        String(tools),
+        String(touchedText),
+        formatUsd(entry.cost),
+        formatLatency(entry.latencyMs),
+        failed ? "failed" : "completed",
+      ],
+      ctxPct: entry.ctxPct,
+      failed,
+    };
+    return row;
+  });
+
+  const ctxIndex = headers.indexOf("CTX%"); // unused here but kept for compatibility; we ignore context% in this view.
+  return renderTable(headers, rows, styles, (cells, row) => {
+    if (row.failed) {
+      const dimmed = cells.map((cell) => styles.dim(cell));
+      dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
+      return dimmed;
+    }
+    // No context-percentage column, so no coloring needed.
+    return cells;
+  });
+}
+
 async function usageDetailsCommand(flags) {
   const entries = await readUsageLedger();
   const { filtered, sessionError } = resolveLedgerFilter(entries, flags);
@@ -911,8 +988,13 @@ async function usageDetailsCommand(flags) {
   }
 
   const styles = usageStyles();
-  writeClippedToStdout(buildDetailsView(limited, styles));
+  if (flags.mode === "agentic") {
+    writeClippedToStdout(buildAgenticDetailsView(limited, styles));
+  } else {
+    writeClippedToStdout(buildDetailsView(limited, styles));
+  }
 }
+
 
 function computeGroupStats(entries, names, keyOf) {
   return names.map((name) => {
@@ -1546,7 +1628,8 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     timeoutMs: selection.timeoutMs || 600000,
   });
   const latencyMs = Date.now() - callStartedAt;
-  const { text, tokens, cost, modelID, providerID } = extractText(response);
+  const { text, tokens, cost, modelID, providerID, reasoningTokens, cacheRead, cacheWrite, toolCalls } =
+    extractText(response);
   const usage = {
     prompt_tokens: tokens.input,
     completion_tokens: tokens.output + tokens.reasoning,
@@ -1574,6 +1657,11 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     mode: "agentic",
     agent,
     opencodeSessionId: sessionId,
+    reasoningTokens,
+    cacheRead,
+    cacheWrite,
+    toolCalls,
+    touchedCount: touchedFiles.length,
     result: {
       content,
       raw: response,

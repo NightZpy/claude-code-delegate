@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-22
+
+### Added
+- Agentic observability: `usage --details --mode <text|agentic>` with an agentic-focused table (AGENT, REASON, CACHE-R, TOOLS, FILES), reasoning/cache/tool-call/touched-count fields on agentic ledger rows, `byMode` totals in `usage --json`, and an "agentic spend vs text" line in the overview.
+
+### Fixed
+- Agentic sessions now follow the task's working directory (server recycled on cwd change); fresh-task wrong-cwd bug caught in live testing.
+
 ## [0.8.0] - 2026-07-22
 
 ### Added

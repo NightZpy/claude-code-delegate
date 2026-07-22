@@ -190,14 +190,21 @@ async function ensureServerLocked(stateDir) {
   if (existing) {
     const server = { base: existing.base, auth: makeBasicAuth(existing.password) };
     if (await checkServerHealth(server)) {
-      return server;
-    }
+      // Sessions inherit the server's cwd — a healthy server anchored to a
+      // different directory must be recycled or the delegate works in the
+      // wrong repo (single-workspace server: ponytail ceiling).
+      if (existing.cwd && path.resolve(existing.cwd) === path.resolve(process.cwd())) {
+        return server;
+      }
+      await stopServerLocked(stateDir, existing);
+    } else {
     // Stale state: the recorded server is gone or wedged — kill the pid
     // (best effort) and respawn below.
     try {
       process.kill(existing.pid, "SIGTERM");
     } catch {
       // ponytail: already dead — nothing to clean up
+    }
     }
   }
 
@@ -227,6 +234,7 @@ async function ensureServerLocked(stateDir) {
     Object.entries(keys.values).filter(([, value]) => value),
   );
   const child = spawn("opencode", ["serve", "--port", String(OPENCODE_PORT)], {
+    cwd: process.cwd(),
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -245,7 +253,7 @@ async function ensureServerLocked(stateDir) {
   const deadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await checkServerHealth(server)) {
-      await writeServerState(stateDir, { pid: child.pid, port: OPENCODE_PORT, password });
+      await writeServerState(stateDir, { pid: child.pid, port: OPENCODE_PORT, password, cwd: process.cwd() });
       return server;
     }
     await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_INTERVAL_MS));
@@ -303,6 +311,22 @@ export async function sendMessage(server, sessionId, { text, agent, model, timeo
   }
 }
 
+async function stopServerLocked(stateDir, state) {
+  try {
+    process.kill(state.pid, "SIGTERM");
+  } catch {}
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(state.pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch {
+      break;
+    }
+  }
+  await fs.rm(serverStateFile(stateDir), { force: true });
+}
+
 export async function stopServer(stateDir) {
   const state = await readServerState(stateDir);
   if (!state) {
@@ -340,19 +364,28 @@ export function extractText(response) {
     .trim();
   const info = response?.info || {};
   const tokens = info.tokens || {};
+  const input = Number(tokens.input || 0);
+  const output = Number(tokens.output || 0);
+  const reasoning = Number(tokens.reasoning || 0);
+  const cacheRead = Number(tokens.cache?.read || 0);
+  const cacheWrite = Number(tokens.cache?.write || 0);
+  const toolCalls = parts.filter((part) => part.type !== "text").length;
+
   return {
     text,
     tokens: {
-      input: Number(tokens.input || 0),
-      output: Number(tokens.output || 0),
-      reasoning: Number(tokens.reasoning || 0),
-      cache: {
-        read: Number(tokens.cache?.read || 0),
-        write: Number(tokens.cache?.write || 0),
-      },
+      input,
+      output,
+      reasoning,
+      cache: { read: cacheRead, write: cacheWrite },
     },
     cost: Number(info.cost || 0),
     modelID: info.modelID || null,
     providerID: info.providerID || null,
+    reasoningTokens: reasoning,
+    cacheRead,
+    cacheWrite,
+    toolCalls,
   };
 }
+
