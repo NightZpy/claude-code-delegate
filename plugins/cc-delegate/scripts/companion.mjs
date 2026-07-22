@@ -891,7 +891,7 @@ async function runUsageTui(flags) {
     );
 
     const rows = stdout.rows || 24;
-    const maxBodyLines = Math.max(1, rows - 4); // tab bar + mode badge + blank + help
+    const maxBodyLines = Math.max(1, rows - 5); // tab bar + mode badge + blank + help + info
     let bodyLines = body.split("\n");
     let truncated = false;
     if (bodyLines.length > maxBodyLines) {
@@ -907,6 +907,10 @@ async function runUsageTui(flags) {
       );
     }
     outLines.push(helpLine);
+    const homeShort = CC_DELEGATE_HOME.replace(os.homedir(), "~");
+    outLines.push(
+      styles.dim(`reset: cc-delegate usage --reset  ·  history + CSV exports live in ${homeShort}/`)
+    );
     const columns = stdout.columns || 100;
     stdout.write(
       `\x1b[2J\x1b[H${outLines.map((line) => clipVisible(line, columns)).join("\n")}`
