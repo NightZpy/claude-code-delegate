@@ -62,10 +62,6 @@
             "output": 0.28,
             "cachedInput": 0.028
           }
-        },
-        {
-          "name": "deepinfra",
-          "id": "deepseek-ai/DeepSeek-V3.2-Exp"
         }
       ],
       "context": 1000000,
@@ -75,7 +71,7 @@
       },
       "quality": 2,
       "tier": "fast-debug",
-      "notes": "Cheapest of the fleet (~Haiku tier). SiliconFlow hosts the same V4-Flash ($0.13/$0.28, pricier than OR $0.09/$0.18); DeepInfra fallback is V3.2-Exp (different model, aider 74.5% verified)."
+      "notes": "Cheapest of the fleet (~Haiku tier). SiliconFlow hosts the same V4-Flash ($0.13/$0.28, pricier than OR $0.09/$0.18)."
     },
     "grok": {
       "label": "Grok 4.5",

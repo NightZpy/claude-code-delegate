@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-21
+
+### Changed
+- `models --guide` (and the guide shown by `cc-delegate-keys`) replaced with a "Models × providers" comparison matrix: quality stars, compact context, and per-provider $/1M in/out side by side, with the model's own version string (from the primary provider's id) shown next to each alias and provider-specific variant ids called out when they differ. Degrades by dropping provider columns right-to-left on narrow terminals instead of wrapping.
+- `deepseek`'s DeepInfra route (the older V3.2-Exp model) removed from `config/models.json`; `deepseek` now routes through OpenRouter and SiliconFlow only, both serving V4-Flash.
+- `setup-keys.mjs` skips the key/quota prompt entirely for providers with no route in the model registry (DeepInfra today); an already-stored key for such a provider is kept in the `.env` untouched, and the remaining prompt steps renumber accordingly.
+
 ## [0.6.0] - 2026-07-21
 
 ### Added

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { stdin as input, stdout as output } from "node:process";
 import { ENV_FILE, maskKey, readEnvFile } from "./lib/env.mjs";
 import { loadConfig, saveConfig } from "./lib/config.mjs";
-import { renderProviderGuide } from "./lib/providerGuide.mjs";
+import { renderProviderGuide, getActiveProviders } from "./lib/providerGuide.mjs";
 import { terminalStyles } from "./lib/styles.mjs";
 import { padVisible } from "./lib/ansi.mjs";
 
@@ -61,6 +61,11 @@ async function main() {
   const models = await loadModelsRegistry();
   output.write(`${renderProviderGuide(models, styles, output.columns || 100)}\n\n`);
 
+  // Providers with no route in the model registry (e.g. deepinfra today)
+  // get no key/quota prompt — an existing stored key for them is kept as-is.
+  const activeProviderNames = new Set(getActiveProviders(models));
+  const activeProviderKeys = PROVIDER_KEYS.filter((provider) => activeProviderNames.has(provider.name));
+
   const existing = await readEnvFile();
   const rl = readline.createInterface({ input, output });
   const next = { ...existing };
@@ -91,9 +96,9 @@ async function main() {
     output.write(`Writing keys to ${ENV_FILE}\n`);
     output.write(`Home: ${os.homedir()}\n\n`);
 
-    for (const [index, provider] of PROVIDER_KEYS.entries()) {
+    for (const [index, provider] of activeProviderKeys.entries()) {
       const current = existing[provider.envKey] || "";
-      output.write(`${styles.bold(`[${index + 1}/${PROVIDER_KEYS.length}] ${provider.name}`)}\n`);
+      output.write(`${styles.bold(`[${index + 1}/${activeProviderKeys.length}] ${provider.name}`)}\n`);
       output.write(`  ${current ? styles.green(`stored ${maskKey(current)}`) : styles.dim("not stored")}\n`);
       const answer = await askOrSkip(rl, () => questionHidden(rl, "  paste key or press Enter to keep/skip: "));
       if (answer === null) {
@@ -113,7 +118,7 @@ async function main() {
   await writeEnv(next);
 
   const config = await loadConfig();
-  const configuredProviders = PROVIDER_KEYS.filter((provider) => next[provider.envKey]);
+  const configuredProviders = activeProviderKeys.filter((provider) => next[provider.envKey]);
 
   if (!eofReached && configuredProviders.length) {
     output.write(`${styles.bold("Monthly spend quotas (USD, optional)")}\n`);

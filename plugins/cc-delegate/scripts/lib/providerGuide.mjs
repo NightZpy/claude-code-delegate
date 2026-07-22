@@ -1,4 +1,5 @@
-import { visibleLength } from "./ansi.mjs";
+import { visibleLength, padVisible, clipVisible } from "./ansi.mjs";
+import { sectionTitle } from "./styles.mjs";
 
 // Editorial, not computable: why each provider is/isn't worth a key.
 export const VERDICTS = {
@@ -10,57 +11,154 @@ export const VERDICTS = {
 
 const PROVIDER_ORDER = ["openrouter", "siliconflow", "deepinfra", "cerebras"];
 
-function formatPrice(value) {
-  const num = Number(value || 0);
-  const rounded = Math.round(num * 100) / 100;
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+// Editorial ordering: cheap/bulk models first, frontier/expensive last.
+const MODEL_ORDER = ["qwen", "deepseek", "glm", "kimi", "grok"];
+
+const SEP = "  ";
+
+// Providers actually reachable through the current model registry — a
+// provider with zero routes (e.g. a removed fallback) is dropped everywhere
+// in the guide instead of showing an empty column/verdict.
+export function getActiveProviders(models) {
+  return PROVIDER_ORDER.filter((name) =>
+    Object.values(models).some((model) => model.providers.some((provider) => provider.name === name)),
+  );
 }
 
-// Greedy word-wrap that keeps each "alias $in/$out" pair intact — a pair is
-// never split across lines, even on a narrow terminal.
-function wrapPairs(pairs, columns, indent) {
-  const maxWidth = Math.max(20, columns);
-  const lines = [];
-  let current = indent;
+function formatPrice(value) {
+  return Number(value || 0).toFixed(2);
+}
 
-  for (const pair of pairs) {
-    const pieceLen = visibleLength(pair);
-    const atLineStart = current === indent;
-    const sep = atLineStart ? "" : "   ";
-    const candidateLen = visibleLength(current) + sep.length + pieceLen;
-    if (!atLineStart && candidateLen > maxWidth) {
-      lines.push(current);
-      current = indent + pair;
-    } else {
-      current += sep + pair;
-    }
+// Compact context-window label: 262144 -> "262k", 1000000/1048576 -> "1M".
+function formatContext(context) {
+  if (context >= 1_000_000) {
+    const millions = Math.round((context / 1_000_000) * 10) / 10;
+    return `${millions}M`;
   }
-  lines.push(current);
-  return lines;
+  return `${Math.round(context / 1000)}k`;
+}
+
+// The part of a provider's model id after the vendor prefix, e.g.
+// "qwen/qwen3-coder-next" -> "qwen3-coder-next"; ids with no "/" (like some
+// Cerebras entries) are used whole.
+function versionOf(id) {
+  const slash = id.indexOf("/");
+  return slash === -1 ? id : id.slice(slash + 1);
+}
+
+function priceOf(model, provider) {
+  const pricing = provider.pricing || model.pricing || {};
+  return `${formatPrice(pricing.input)}/${formatPrice(pricing.output)}`;
+}
+
+function buildProviderCell(model, providerName, styles) {
+  const provider = model.providers.find((p) => p.name === providerName);
+  if (!provider) {
+    return styles.dim("—");
+  }
+
+  const primary = model.providers[0];
+  const isPrimary = provider === primary;
+  const price = priceOf(model, provider);
+  const dot = isPrimary ? `${styles.cyan("●")} ` : "";
+
+  const variant = versionOf(provider.id);
+  const differsFromPrimary = variant.toLowerCase() !== versionOf(primary.id).toLowerCase();
+  const suffix = differsFromPrimary ? ` ${styles.dim(`(${variant})`)}` : "";
+
+  return `${dot}${price}${suffix}`;
+}
+
+// Renders the "MODEL alias + version" field, e.g. bold "qwen" + dim
+// "qwen3-coder-next".
+function buildModelField(alias, model, styles) {
+  return `${styles.bold(alias)}  ${styles.dim(versionOf(model.providers[0].id))}`;
+}
+
+function formatQuality(quality) {
+  return "★".repeat(Number(quality) || 0);
+}
+
+// Builds the "Models × providers" comparison matrix. Drops provider columns
+// right-to-left until the table fits `columns`, noting how many were cut.
+function renderMatrix(models, providerNames, styles, columns) {
+  const aliases = MODEL_ORDER.filter((alias) => models[alias]);
+
+  const modelFields = aliases.map((alias) => buildModelField(alias, models[alias], styles));
+  const qualityFields = aliases.map((alias) => formatQuality(models[alias].quality));
+  const ctxFields = aliases.map((alias) => formatContext(models[alias].context));
+  const providerFields = {};
+  for (const name of providerNames) {
+    providerFields[name] = aliases.map((alias) => buildProviderCell(models[alias], name, styles));
+  }
+
+  const modelWidth = Math.max(visibleLength("MODEL"), ...modelFields.map(visibleLength));
+  const qualityWidth = Math.max(visibleLength("QUALITY"), ...qualityFields.map(visibleLength));
+  const ctxWidth = Math.max(visibleLength("CTX"), ...ctxFields.map(visibleLength));
+  const providerWidths = {};
+  for (const name of providerNames) {
+    providerWidths[name] = Math.max(
+      visibleLength(name.toUpperCase()),
+      ...providerFields[name].map(visibleLength),
+    );
+  }
+
+  // Drop provider columns from the right until the row fits `columns`.
+  const shownProviders = [...providerNames];
+  const fixedWidth = modelWidth + qualityWidth + ctxWidth + 2 * SEP.length;
+  const widthOf = (names) =>
+    fixedWidth + names.reduce((sum, name) => sum + providerWidths[name] + SEP.length, 0);
+  while (shownProviders.length > 0 && widthOf(shownProviders) > columns) {
+    shownProviders.pop();
+  }
+  const droppedCount = providerNames.length - shownProviders.length;
+
+  const headerCells = [
+    padVisible("MODEL", modelWidth),
+    padVisible("QUALITY", qualityWidth),
+    padVisible("CTX", ctxWidth),
+    ...shownProviders.map((name) => padVisible(name.toUpperCase(), providerWidths[name])),
+  ];
+  const lines = [
+    sectionTitle("Models × providers ($ per 1M tokens, in/out · ● = primary route)", styles),
+    "",
+    styles.dim(styles.underline(headerCells.join(SEP))),
+  ];
+
+  aliases.forEach((alias, index) => {
+    const cells = [
+      padVisible(modelFields[index], modelWidth),
+      padVisible(qualityFields[index], qualityWidth),
+      padVisible(ctxFields[index], ctxWidth),
+      ...shownProviders.map((name) => padVisible(providerFields[name][index], providerWidths[name])),
+    ];
+    lines.push(cells.join(SEP));
+  });
+
+  if (droppedCount > 0) {
+    lines.push(
+      styles.dim(`… ${droppedCount} more provider${droppedCount === 1 ? "" : "s"}: use a wider terminal or models --json`),
+    );
+  }
+
+  return lines.map((line) => clipVisible(line, columns));
 }
 
 export function renderProviderGuide(models, styles, columns = 100) {
-  const byProvider = {};
+  const providerNames = getActiveProviders(models);
 
-  for (const [alias, model] of Object.entries(models)) {
-    model.providers.forEach((provider, index) => {
-      const list = byProvider[provider.name] || (byProvider[provider.name] = []);
-      const pricing = provider.pricing || model.pricing || {};
-      const text = `${alias} $${formatPrice(pricing.input)}/$${formatPrice(pricing.output)}`;
-      list.push(index === 0 ? text : `${text} ${styles.dim("(fallback)")}`);
-    });
+  const lines = [...renderMatrix(models, providerNames, styles, columns), ""];
+
+  for (const name of providerNames) {
+    lines.push(styles.dim(`▎ ${name}: ${VERDICTS[name] || "no verdict on file"}`));
   }
 
-  const names = PROVIDER_ORDER.filter((name) => byProvider[name]);
-  const nameWidth = Math.max(...names.map((name) => name.length));
-  const lines = ["Provider guide (from models.json)", ""];
-
-  for (const name of names) {
-    lines.push(
-      `${styles.cyan("▎")}${styles.bold(name.padEnd(nameWidth))}  → ${styles.dim(VERDICTS[name] || "no verdict on file")}`,
-    );
-    lines.push(...wrapPairs(byProvider[name], columns, "  "));
-  }
+  lines.push(
+    "",
+    styles.dim(
+      "Roadmap: agentic mode (full Claude Code harness) will use native DeepSeek/Moonshot keys — not implemented yet; these keys cover text delegation only.",
+    ),
+  );
 
   return lines.join("\n");
 }
