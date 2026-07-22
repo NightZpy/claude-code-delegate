@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-22
+
+### Added
+- `using-cc-delegate` skill (model-invocable): ships the decision logic with the plugin so any agent can pick text vs agentic, choose the model by task type/cost, write an effective brief (prompt contract), read usage/health/quota/advisory signals, and run the review loop — no external orchestration skill required.
+
 ## [0.10.0] - 2026-07-22
 
 ### Added
