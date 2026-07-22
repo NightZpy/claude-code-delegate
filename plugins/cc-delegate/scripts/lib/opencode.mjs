@@ -526,3 +526,25 @@ export function summarizeActivity(messages) {
   }
   return lines.length <= 10 ? lines : lines.slice(-10);
 }
+
+// Sum cost + tokens across ALL assistant messages in a session. An agentic run
+// is a tool loop: every read/bash/edit turn is a SEPARATE billed model call.
+// The final message's info.cost is only the last turn — the real bill is the
+// sum of every assistant turn. Under-counting this was a ~17x cost error.
+export function sumSessionUsage(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  let cost = 0, input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, turns = 0;
+  for (const m of list) {
+    const info = m?.info || m || {};
+    if (info.role !== "assistant") continue;
+    turns += 1;
+    cost += Number(info.cost || 0);
+    const t = info.tokens || {};
+    input += Number(t.input || 0);
+    output += Number(t.output || 0);
+    reasoning += Number(t.reasoning || 0);
+    cacheRead += Number(t.cache?.read || 0);
+    cacheWrite += Number(t.cache?.write || 0);
+  }
+  return { cost, input, output, reasoning, cacheRead, cacheWrite, turns };
+}

@@ -28,9 +28,10 @@ async function appendUsageLedger(job) {
     if (!promptTokens && !completionTokens) {
       return;
     }
-  } else if (!failedProviders.length && !job.contextExceeded) {
+  } else if (!failedProviders.length && !job.contextExceeded && !promptTokens && !completionTokens) {
     // every provider was skipped for a missing key — that's config, not a health
-    // signal. Context-guard failures (contextExceeded) DO get recorded.
+    // signal. Context-guard failures AND failed-but-billed runs (tokens > 0) DO
+    // get recorded, so real provider spend is never invisible.
     return;
   }
 

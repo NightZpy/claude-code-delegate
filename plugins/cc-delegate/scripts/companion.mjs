@@ -24,6 +24,7 @@ import {
   acquireAgenticSlot,
   listMessages,
   summarizeActivity,
+  sumSessionUsage,
   createSession,
   ensureServer,
   extractText,
@@ -85,7 +86,14 @@ function normalizeUsage(usage) {
 function computeCost(pricing = {}, usage = {}) {
   const input = Number(pricing.input || 0);
   const output = Number(pricing.output || 0);
-  const promptCost = (Number(usage.prompt_tokens || 0) / 1000000) * input;
+  // Cached input tokens are billed at ~10% of the fresh input rate (providers
+  // bill them as a separate line item). Use the model's cachedInput rate when
+  // the provider reports cached_tokens; otherwise everything is fresh input.
+  const cachedRate = pricing.cachedInput !== undefined ? Number(pricing.cachedInput) : input;
+  const prompt = Number(usage.prompt_tokens || 0);
+  const cached = Number(usage.prompt_tokens_details?.cached_tokens || usage.cached_tokens || 0);
+  const fresh = Math.max(0, prompt - cached);
+  const promptCost = (fresh / 1000000) * input + (cached / 1000000) * cachedRate;
   const completionCost = (Number(usage.completion_tokens || 0) / 1000000) * output;
   return Number((promptCost + completionCost).toFixed(6));
 }
@@ -1901,7 +1909,30 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
         );
       }
     } catch (error) {
-      // Salvage: capture any files already touched before the failure.
+      // Salvage: a run can bill tokens (each tool turn) before failing. Capture
+      // the real session cost so the failed ledger row reflects actual spend,
+      // and any files touched before the failure.
+      try {
+        if (server && sessionId) {
+          const msgs = await listMessages(server, sessionId);
+          const su = sumSessionUsage(msgs);
+          if (su.turns > 0) {
+            await tools.setJob({
+              cost: su.cost,
+              usage: {
+                prompt_tokens: su.input,
+                completion_tokens: su.output + su.reasoning,
+                total_tokens: su.input + su.output + su.reasoning,
+              },
+              provider: candidate.name,
+              model: selection.alias,
+            });
+            await tools.log(`billed before failure: $${su.cost.toFixed(6)} across ${su.turns} model turns (recorded to the ledger)`);
+          }
+        }
+      } catch {
+        // best-effort — cost salvage never blocks the failure path
+      }
       let touched = [];
       try {
         touched = (await listTouchedFiles(job.cwd)).filter((f) => !baselineDirty.has(f));
@@ -1935,10 +1966,29 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
         `(no text, no tool calls) — treated as failed. Check provider health or retry with --provider/--model.`,
     );
   }
+  // Cost/usage = SUM over every assistant turn in the session (the tool loop
+  // bills each turn), not just the final message. Fetch once and reuse for the
+  // activity log. Falls back to the final message's numbers if the fetch fails.
+  let sessionMessages = [];
+  try {
+    sessionMessages = await listMessages(server, sessionId);
+  } catch {
+    // best-effort
+  }
+  const sessionUsage = sumSessionUsage(sessionMessages);
+  const billedInput = sessionUsage.turns ? sessionUsage.input : tokens.input;
+  const billedOutput = sessionUsage.turns ? sessionUsage.output : tokens.output;
+  const billedReasoning = sessionUsage.turns ? sessionUsage.reasoning : tokens.reasoning;
+  const billedCacheRead = sessionUsage.turns ? sessionUsage.cacheRead : cacheRead;
+  const billedCacheWrite = sessionUsage.turns ? sessionUsage.cacheWrite : cacheWrite;
+  const billedCost = sessionUsage.turns && sessionUsage.cost > 0 ? sessionUsage.cost : cost;
+  if (sessionUsage.turns > 1) {
+    await tools.log(`agentic cost: $${billedCost.toFixed(6)} across ${sessionUsage.turns} model turns (final message alone was $${Number(cost).toFixed(6)})`);
+  }
   const usage = {
-    prompt_tokens: tokens.input,
-    completion_tokens: tokens.output + tokens.reasoning,
-    total_tokens: tokens.input + tokens.output + tokens.reasoning,
+    prompt_tokens: billedInput,
+    completion_tokens: billedOutput + billedReasoning,
+    total_tokens: billedInput + billedOutput + billedReasoning,
   };
 
   let touchedFiles = [];
@@ -1949,33 +1999,29 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     await tools.log(`touched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`);
   }
 
-  // Append live activity summary to the job log
   try {
-    const messages = await listMessages(server, sessionId);
-    const activity = summarizeActivity(messages);
+    const activity = summarizeActivity(sessionMessages);
     if (activity.length > 0) {
-      await tools.log(
-        `agentic activity:\n${activity.map((l) => `  ${l}`).join("\n")}`,
-      );
+      await tools.log(`agentic activity:\n${activity.map((l) => `  ${l}`).join("\n")}`);
     }
   } catch {
-    // best-effort — never fail the job on activity polling
+    // best-effort
   }
 
   return {
     provider: providerID || candidate.name,
     attempts: [],
     usage,
-    cost,
+    cost: billedCost,
     latencyMs,
     ctxPct: contextGuard.ctxPct,
     contextAdvisory: contextGuard.advisoryLine,
     mode: "agentic",
     agent,
     opencodeSessionId: sessionId,
-    reasoningTokens,
-    cacheRead,
-    cacheWrite,
+    reasoningTokens: billedReasoning,
+    cacheRead: billedCacheRead,
+    cacheWrite: billedCacheWrite,
     toolCalls,
     touchedCount: touchedFiles.length,
     result: {

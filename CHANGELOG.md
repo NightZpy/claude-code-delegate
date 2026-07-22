@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-22
+
+### Fixed (cost accounting — a ~17x under-count)
+- **Agentic cost is now summed over the whole tool loop.** An agentic run makes a separate billed model call for each read/bash/edit turn; we were recording only the FINAL message's cost. Now the ledger sums cost + tokens across every assistant turn in the session (verified against a real SiliconFlow bill: our ledger read $0.33 where the provider charged $5.69). The final-message figure is logged alongside for reference.
+- **Failed-but-billed runs are now recorded.** A run that consumed tokens before failing (timeout/empty/rejection after partial work) records its real billed cost to the ledger instead of $0 — provider spend is no longer invisible.
+- **Cached input tokens are priced at their (cheaper) rate** when the provider reports `cached_tokens`, using the registry's per-provider `cachedInput` price, instead of charging every prompt token at the full input rate.
+
 ## [0.14.0] - 2026-07-22
 
 ### Added
