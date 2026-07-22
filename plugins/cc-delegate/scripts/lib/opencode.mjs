@@ -1,3 +1,4 @@
+import http from "node:http";
 import { spawn, execFile } from "node:child_process";
 import crypto from "node:crypto";
 import os from "node:os";
@@ -13,7 +14,7 @@ const OPENCODE_PORT = 4096;
 const HEALTH_POLL_INTERVAL_MS = 250;
 const HEALTH_POLL_TIMEOUT_MS = 20000;
 const HEALTH_REQUEST_TIMEOUT_MS = 2000;
-const DEFAULT_MESSAGE_TIMEOUT_MS = 600000;
+const DEFAULT_MESSAGE_TIMEOUT_MS = 900000;
 
 export async function isOpencodeInstalled() {
   try {
@@ -228,7 +229,7 @@ async function ensureServerLocked(stateDir) {
       if (existing.cwd && path.resolve(existing.cwd) === path.resolve(process.cwd())) {
         return server;
       }
-      await stopServerLocked(stateDir, existing);
+      await stopServer(stateDir);
     } else {
     // Stale state: the recorded server is gone or wedged — kill the pid
     // (best effort) and respawn below.
@@ -322,41 +323,94 @@ export async function createSession(server) {
   return ocFetch(server, "POST", "/session", {});
 }
 
-export async function sendMessage(server, sessionId, { text, agent, model, timeoutMs = DEFAULT_MESSAGE_TIMEOUT_MS }) {
+export async function httpRequestJson({
+  base,
+  auth,
+  method,
+  path,
+  body,
+  timeoutMs,
+}) {
+  const url = new URL(path, base);
+  const options = {
+    hostname: url.hostname,
+    port: url.port || 80,
+    path: url.pathname + url.search,
+    method,
+    headers: {
+      authorization: auth,
+      ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(options, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        const data = Buffer.concat(chunks).toString();
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const trimmed = data.slice(0, 400);
+          reject(
+            new Error(
+              `OpenCode API ${method} ${path} returned ${res.statusCode}: ${trimmed}`,
+            ),
+          );
+          return;
+        }
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          reject(new Error(`OpenCode API ${method} ${path} returned unparseable JSON: ${data.slice(0, 400)}`));
+        }
+      });
+      res.on("error", reject);
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error("__cc_timeout__"));
+    });
+
+    req.on("error", (err) => {
+      if (err && String(err.message).includes("__cc_timeout__")) {
+        reject(
+          new Error(
+            `model call exceeded ${Math.round(timeoutMs / 1000)}s (raise with --call-timeout)`,
+          ),
+        );
+        return;
+      }
+      reject(err);
+    });
+
+    if (body !== undefined) {
+      req.write(JSON.stringify(body));
+    }
+    req.end();
+  });
+}
+
+export async function sendMessage(
+  server,
+  sessionId,
+  { text, agent, model, timeoutMs = DEFAULT_MESSAGE_TIMEOUT_MS },
+) {
   const body = {
     parts: [{ type: "text", text }],
-    // model MUST be an object — a plain string is rejected with BadRequest.
     model: { providerID: model.providerID, modelID: model.modelID },
   };
   if (agent) {
     body.agent = agent;
   }
-  try {
-    return await ocFetch(server, "POST", `/session/${sessionId}/message`, body, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    if (error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-      throw new Error(`opencode message timed out after ${timeoutMs}ms`);
-    }
-    throw error;
-  }
-}
 
-async function stopServerLocked(stateDir, state) {
-  try {
-    process.kill(state.pid, "SIGTERM");
-  } catch {}
-  const deadline = Date.now() + 3000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(state.pid, 0);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    } catch {
-      break;
-    }
-  }
-  await fs.rm(serverStateFile(stateDir), { force: true });
+  return httpRequestJson({
+    base: server.base,
+    auth: server.auth,
+    method: "POST",
+    path: `/session/${sessionId}/message`,
+    body,
+    timeoutMs,
+  });
 }
 
 export async function stopServer(stateDir) {

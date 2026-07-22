@@ -163,6 +163,11 @@ export async function writeIndex(cwd, index) {
   await writeJson(workspace.indexFile, next);
 }
 
+export async function jobLogFilePath(cwd, jobId) {
+  const workspace = await ensureWorkspaceDirs(cwd);
+  return path.join(workspace.jobsDir, `${jobId}.log`);
+}
+
 export async function appendJobLog(cwd, jobId, message) {
   const workspace = await ensureWorkspaceDirs(cwd);
   const line = `[${new Date().toISOString()}] ${message}\n`;

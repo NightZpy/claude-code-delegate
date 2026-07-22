@@ -47,6 +47,7 @@ import {
   listJobs,
   loadJob,
   readJobLogTail,
+  jobLogFilePath,
   updateJob,
 } from "./lib/state.mjs";
 
@@ -1759,6 +1760,8 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
   const selection = resolveModelSelection(models, request.model, request.provider);
   const candidate = selection.providers[0];
   const agent = request.write ? "cc-build" : "cc-plan";
+  // Snapshot the dirty tree BEFORE the run so salvage reports only what THIS run changed.
+  const baselineDirty = new Set(await listTouchedFiles(job.cwd).catch(() => []));
 
   if (request.opencodeSessionId) {
     await tools.log(
@@ -1788,63 +1791,120 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     );
   }
 
+  const timeoutMs = request.callTimeoutMs || selection.timeoutMs || 900000;
+
   // Serialize the whole agentic run: server + session + message share one
   // opencode server, so a concurrent job would invalidate this one's session.
   const releaseSlot = await acquireAgenticSlot(CC_DELEGATE_HOME, {
     onWait: () => tools.log("waiting for the agentic slot (another agentic job is running)…"),
   });
+
   let latencyMs;
   let response;
   let server;
   let sessionId = request.opencodeSessionId || null;
+
+  // --- helper to decide when a retry is worthwhile ---
+  const SHOULD_RETRY_ERRORS = ["fetch failed", "econnreset", "socket hang up"];
+  const NO_RETRY_ERRORS = ["exceeded", "__cc_timeout__"];
+
+  function shouldRetry(err) {
+    const msg = String(err.message || "").toLowerCase();
+    if (NO_RETRY_ERRORS.some((hint) => msg.includes(hint))) {
+      return false;
+    }
+    return SHOULD_RETRY_ERRORS.some((hint) => msg.includes(hint));
+  }
+  // -------------------------------------------------
+
   try {
-    await tools.log(`ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`);
-    const wroteLeanAgents = await ensureLeanAgents();
-    if (wroteLeanAgents) {
-      // New agent definitions only load at server start — restart if running.
-      try { await stopServer(CC_DELEGATE_HOME); } catch {}
-    }
-    server = await ensureServer(CC_DELEGATE_HOME);
-
-    if (!sessionId) {
-      const session = await createSession(server);
-      sessionId = session.id;
-      await tools.log(`created opencode session ${sessionId}`);
-    }
-    await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
-
-    const send = async () =>
-      sendMessage(server, sessionId, {
-        text: request.prompt,
-        agent,
-        model: { providerID: candidate.name, modelID: candidate.id },
-        timeoutMs: selection.timeoutMs || 600000,
-      });
-    const callStartedAt = Date.now();
     try {
-      response = await send();
-    } catch (firstError) {
-      // Retry once on a dropped session/connection before failing the job.
-      await tools.log(`agentic call failed (${firstError?.message || firstError}); retrying once on a fresh session`);
+      await tools.log(
+        `ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`,
+      );
+      const wroteLeanAgents = await ensureLeanAgents();
+      if (wroteLeanAgents) {
+        // New agent definitions only load at server start — restart if running.
+        try {
+          await stopServer(CC_DELEGATE_HOME);
+        } catch {}
+      }
+      server = await ensureServer(CC_DELEGATE_HOME);
+
+      if (!sessionId) {
+        const session = await createSession(server);
+        sessionId = session.id;
+        await tools.log(`created opencode session ${sessionId}`);
+      }
+      await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
+
+      const send = async () =>
+        sendMessage(server, sessionId, {
+          text: request.prompt,
+          agent,
+          model: { providerID: candidate.name, modelID: candidate.id },
+          timeoutMs,
+        });
+
+      const callStartedAt = Date.now();
       try {
+        response = await send();
+      } catch (firstError) {
+        if (!shouldRetry(firstError)) {
+          throw firstError; // timeout/other → fail fast, no retry
+        }
+        await tools.log(
+          `agentic call failed (${firstError?.message || firstError}); retrying once on a fresh session`,
+        );
         const session = await createSession(server);
         sessionId = session.id;
         await tools.setJob({ opencodeSessionId: sessionId });
-        response = await send();
-      } catch (secondError) {
+        try {
+          response = await send();
+        } catch (secondError) {
+          throw new Error(
+            `agentic call failed for ${selection.alias} via ${candidate.name} ` +
+              `(session ${sessionId} on ${server.base}): ${secondError?.message || secondError}. ` +
+              `If ${candidate.name} is degraded, retry with --provider <name> (see \`cc-delegate models\`) or --model <alias>.`,
+          );
+        }
+      }
+      latencyMs = Date.now() - callStartedAt;
+    } catch (error) {
+      // Salvage: capture any files already touched before the failure.
+      let touched = [];
+      try {
+        touched = (await listTouchedFiles(job.cwd)).filter((f) => !baselineDirty.has(f));
+      } catch {
+        // best-effort — never fail the salvage step
+      }
+
+      if (touched.length > 0) {
+        await tools.setJob({ touchedFiles: touched, incomplete: true });
         throw new Error(
-          `agentic call failed for ${selection.alias} via ${candidate.name} ` +
-            `(session ${sessionId} on ${server.base}): ${secondError?.message || secondError}. ` +
-            `If ${candidate.name} is degraded, retry with --provider <name> (see \`cc-delegate models\`) or --model <alias>.`,
+          `INCOMPLETE: ${touched.length} file(s) modified before the run failed: ${touched.join(", ")}. ` +
+            `Review before retrying (a plain retry may double-edit a dirty tree). ` +
+            `Underlying error: ${error.message}`,
         );
       }
+
+      throw error; // true failure — nothing applied
     }
-    latencyMs = Date.now() - callStartedAt;
   } finally {
     await releaseSlot();
   }
+
   const { text, tokens, cost, modelID, providerID, reasoningTokens, cacheRead, cacheWrite, toolCalls } =
     extractText(response);
+  // A genuine agentic run yields text and/or tool calls. An empty response with
+  // no tools means the runtime/model produced nothing — never report that as a
+  // success (it silently corrupts the caller's model of what shipped).
+  if (!String(text || "").trim() && !(toolCalls > 0)) {
+    throw new Error(
+      `agentic run for ${selection.alias} via ${candidate.name} produced an empty response ` +
+        `(no text, no tool calls) — treated as failed. Check provider health or retry with --provider/--model.`,
+    );
+  }
   const usage = {
     prompt_tokens: tokens.input,
     completion_tokens: tokens.output + tokens.reasoning,
@@ -1854,7 +1914,7 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
   let touchedFiles = [];
   let content = text;
   if (agent === "cc-build") {
-    touchedFiles = await listTouchedFiles(job.cwd);
+    touchedFiles = (await listTouchedFiles(job.cwd)).filter((f) => !baselineDirty.has(f));
     content = `${text}\n\ntouched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`;
     await tools.log(`touched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`);
   }
@@ -1864,7 +1924,9 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     const messages = await listMessages(server, sessionId);
     const activity = summarizeActivity(messages);
     if (activity.length > 0) {
-      await tools.log(`agentic activity:\n${activity.map(l => `  ${l}`).join("\n")}`);
+      await tools.log(
+        `agentic activity:\n${activity.map((l) => `  ${l}`).join("\n")}`,
+      );
     }
   } catch {
     // best-effort — never fail the job on activity polling
@@ -1874,8 +1936,6 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     provider: providerID || candidate.name,
     attempts: [],
     usage,
-    // info.cost is the actual billed number — registry pricing math would be
-    // wrong here because the agentic harness inflates input tokens (~14k/msg).
     cost,
     latencyMs,
     ctxPct: contextGuard.ctxPct,
@@ -1900,6 +1960,7 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
 }
 
 
+
 function summarizeJobForOutput(job, progressPreview) {
   const startedAt = job.createdAt;
   const endedAt = job.completedAt || job.cancelledAt || job.updatedAt;
@@ -1922,8 +1983,11 @@ function summarizeJobForOutput(job, progressPreview) {
     resumedFrom: job.resumedFrom ?? null,
     elapsedMs,
     progressPreview,
+    touchedFiles: job.result?.touchedFiles || null,
+    incomplete: job.incomplete || false,
   };
 }
+
 
 async function buildStatusPayload(cwd, jobId, all = false) {
   if (jobId) {
@@ -2146,6 +2210,9 @@ async function createTaskJob(cwd, flags, positionals) {
     agentic: Boolean(flags.agentic),
     write: Boolean(flags.write),
     opencodeSessionId,
+    callTimeoutMs: flags["call-timeout"] !== undefined
+      ? Number(flags["call-timeout"]) * 1000
+      : undefined,
   };
 
   const job = await createJob(cwd, {
@@ -2163,6 +2230,7 @@ async function createTaskJob(cwd, flags, positionals) {
 
   return job;
 }
+
 
 // Non-blocking: quota alerts never fail or delay the task, they're just recorded
 // on the job (log + a `quota`/`quotaAlert` field) so foreground and background
@@ -2267,6 +2335,7 @@ Flags:
   --background          run detached; prints {jobId}; collect with status/result/watch
   --system <text>       override the system prompt
   --max-tokens <n>      cap output tokens
+  --call-timeout <sec>  max seconds for one model call (default 900; agentic)
   --json                machine-readable output
 
 Examples:
@@ -2282,7 +2351,8 @@ async function taskCommand(cwd, flags, positionals) {
   const job = await createTaskJob(cwd, flags, positionals);
 
   if (flags.background) {
-    const workerPid = spawnBackgroundWorker(ENTRYPOINT, cwd, job.id);
+    const workerLog = await jobLogFilePath(cwd, job.id);
+    const workerPid = spawnBackgroundWorker(ENTRYPOINT, cwd, job.id, workerLog);
     const queued = await updateJob(cwd, job.id, {
       status: "queued",
       pid: workerPid,
@@ -2326,7 +2396,11 @@ async function statusCommand(cwd, flags, positionals) {
 
   const lines = [];
   if (jobId) {
-    lines.push(`${payload.id} ${payload.status} elapsed=${payload.elapsedMs}ms`);
+    let statusLabel = payload.status;
+    if (payload.incomplete) {
+      statusLabel = "incomplete";
+    }
+    lines.push(`${payload.id} ${statusLabel} elapsed=${payload.elapsedMs}ms`);
     if (payload.mode === "agentic") {
       lines.push(`mode: agentic agent=${payload.agent || "plan"}`);
     }
@@ -2337,6 +2411,17 @@ async function statusCommand(cwd, flags, positionals) {
       lines.push(`  ${line}`);
     }
 
+    // Show touched files when a run failed/incomplete and files were modified
+    if (
+      (payload.status === "failed" || payload.incomplete) &&
+      Array.isArray(payload.touchedFiles) &&
+      payload.touchedFiles.length > 0
+    ) {
+      lines.push(
+        `modified before failure: ${payload.touchedFiles.join(", ")} (review before retrying)`,
+      );
+    }
+
     // Live activity summary for agentic jobs (best-effort, never throws)
     if (payload.mode === "agentic") {
       const job = await loadJob(cwd, jobId);
@@ -2344,7 +2429,10 @@ async function statusCommand(cwd, flags, positionals) {
         try {
           const serverState = await readServerState(CC_DELEGATE_HOME);
           if (serverState) {
-            const server = { base: serverState.base, auth: makeBasicAuth(serverState.password) };
+            const server = {
+              base: serverState.base,
+              auth: makeBasicAuth(serverState.password),
+            };
             const messages = await listMessages(server, job.opencodeSessionId);
             const activity = summarizeActivity(messages);
             if (activity.length > 0) {
@@ -2366,26 +2454,40 @@ async function statusCommand(cwd, flags, positionals) {
 
   lines.push(`running: ${payload.runningJobs.length}`);
   if (payload.latestFinished) {
-    lines.push(`latest finished: ${payload.latestFinished.id} ${payload.latestFinished.status}`);
+    lines.push(
+      `latest finished: ${payload.latestFinished.id} ${payload.latestFinished.status}`,
+    );
   }
   for (const job of payload.recent) {
+    let displayStatus = job.status;
+    if (job.incomplete) {
+      displayStatus = "incomplete";
+    }
     const resumedSuffix = job.resumedFrom ? ` (resumed from ${job.resumedFrom})` : "";
-    lines.push(`${job.id} ${job.status} elapsed=${job.elapsedMs}ms${resumedSuffix}`);
+    lines.push(
+      `${job.id} ${displayStatus} elapsed=${job.elapsedMs}ms${resumedSuffix}`,
+    );
   }
   process.stdout.write(`${lines.join("\n")}\n`);
 }
 
 
+
 async function resultCommand(cwd, flags, positionals) {
   const jobId = positionals[0];
-  const job = jobId ? await findJob(cwd, jobId) : await findLatestFinishedJob(cwd);
+  const job = jobId
+    ? await findJob(cwd, jobId)
+    : await findLatestFinishedJob(cwd);
   if (!job) {
-    throw new Error(jobId ? `job ${jobId} not found` : "no finished jobs found");
+    throw new Error(
+      jobId ? `job ${jobId} not found` : "no finished jobs found",
+    );
   }
 
+  const isIncomplete = job.incomplete === true;
   const payload = {
     id: job.id,
-    status: job.status,
+    status: isIncomplete ? "incomplete" : job.status,
     model: job.result?.alias || job.model,
     modelId: job.result?.modelId || null,
     provider: job.result?.provider || job.provider,
@@ -2400,6 +2502,7 @@ async function resultCommand(cwd, flags, positionals) {
     advisory: job.advisory || null,
     contextAdvisory: job.contextAdvisory || null,
     resumedFrom: job.resumedFrom || null,
+    incomplete: isIncomplete,
   };
 
   if (flags.json) {
@@ -2408,15 +2511,38 @@ async function resultCommand(cwd, flags, positionals) {
   }
 
   const alertPrefix = buildAlertPrefix(job);
-  const resumedLine = payload.resumedFrom ? `resumed from ${payload.resumedFrom}\n` : "";
+  const resumedLine = payload.resumedFrom
+    ? `resumed from ${payload.resumedFrom}\n`
+    : "";
 
   if (payload.output) {
     process.stdout.write(`${resumedLine}${alertPrefix}${payload.output}\n`);
+    if (
+      (job.status === "failed" || isIncomplete) &&
+      Array.isArray(payload.touchedFiles) &&
+      payload.touchedFiles.length > 0
+    ) {
+      process.stdout.write(
+        `modified before failure: ${payload.touchedFiles.join(", ")} (review before retrying)\n`,
+      );
+    }
     return;
   }
 
-  process.stdout.write(`${resumedLine}${alertPrefix}${payload.error || "no output stored"}\n`);
+  process.stdout.write(
+    `${resumedLine}${alertPrefix}${payload.error || "no output stored"}\n`,
+  );
+  if (
+    (job.status === "failed" || isIncomplete) &&
+    Array.isArray(payload.touchedFiles) &&
+    payload.touchedFiles.length > 0
+  ) {
+    process.stdout.write(
+      `modified before failure: ${payload.touchedFiles.join(", ")} (review before retrying)\n`,
+    );
+  }
 }
+
 
 async function cancelCommand(cwd, positionals) {
   const jobId = positionals[0];

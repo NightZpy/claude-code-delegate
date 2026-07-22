@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-22
+
+### Fixed (agentic reliability — from two field reports)
+- **300s invisible timeout removed.** Agentic message calls now use `node:http` (not global fetch, whose undici default capped calls at 300s and surfaced as a bogus "fetch failed"). Default agentic call budget raised to 15 min; per-call `--call-timeout <sec>` flag; timeout errors now say "model call exceeded Ns".
+- **No more false `completed`.** An empty agentic response (no text, no tool calls) is now treated as failed instead of a silent empty success. Background-worker stderr (incl. an import/parse crash) is captured into the job log, so a broken runtime is visible in `status`/`result` instead of vanishing.
+- **Partial `--write` work is salvaged.** On failure, files the run actually modified (diffed against a pre-run snapshot — no longer the whole dirty tree) are reported and the job is marked `incomplete`, not `failed`, so the orchestrator neither doubles the edits nor discards good work.
+- **`touched files` now lists only the job's changes**, computed against a baseline snapshot — not the entire working tree.
+- Latent crash fixed: `stopServerLocked` was referenced but never defined (fired when a healthy server existed in another cwd).
+- Retry no longer repeats a timed-out call identically (fails fast on timeouts; retries only connection errors).
+
+### Docs
+- `--prompt-file` documented as the safe way to pass long briefs (inline shell args mangle backticks/`$`/newlines); confirmed working in agentic mode.
+
 ## [0.12.0] - 2026-07-22
 
 ### Fixed

@@ -1,8 +1,9 @@
+import { openSync } from "node:fs";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ENV_FILE, USAGE_LEDGER_FILE } from "./env.mjs";
-import { appendJobLog, updateJob } from "./state.mjs";
+import { appendJobLog, updateJob , loadJob} from "./state.mjs";
 
 function errorMessage(error) {
   if (!error) {
@@ -100,22 +101,33 @@ export async function runTrackedJob(cwd, jobId, runner) {
     return completed;
   } catch (error) {
     const message = errorMessage(error);
+    // A runner that applied edits before dying sets incomplete:true — don't
+    // report that as a bare failure (work is on disk).
+    const current = await loadJob(cwd, jobId);
+    const status = current?.incomplete ? "incomplete" : "failed";
     const failed = await updateJob(cwd, jobId, {
-      status: "failed",
+      status,
       pid: null,
       error: message,
     });
     await appendUsageLedger(failed);
-    await appendJobLog(cwd, jobId, `job failed: ${message}`);
+    await appendJobLog(cwd, jobId, `job ${status}: ${message}`);
     return failed;
   }
 }
 
-export function spawnBackgroundWorker(entrypoint, cwd, jobId) {
+export function spawnBackgroundWorker(entrypoint, cwd, jobId, stderrPath) {
+  // Capture the worker's stderr (incl. an import/parse SyntaxError that would
+  // otherwise be invisible) into the job log, so a crashed runtime is diagnosable
+  // from `status`/`result` instead of silently vanishing.
+  let stderr = "ignore";
+  if (stderrPath) {
+    try { stderr = openSync(stderrPath, "a"); } catch { stderr = "ignore"; }
+  }
   const child = spawn(process.execPath, [entrypoint, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     detached: true,
     env: process.env,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", stderr],
     windowsHide: true,
   });
   child.unref();

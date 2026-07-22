@@ -110,6 +110,9 @@ After you dispatch, you MUST look at the outcome before doing anything else — 
 - On a **failed** job: read the error AND any `⚡` advisory, then act — re-dispatch on the healthy route (`--provider …` / a different `--model`), don't silently retry the same broken route or quietly redo the work yourself.
 - Agentic jobs are **serialized** (they share one server) — launching several at once is fine, they queue; just remember to collect all of them.
 
+## Pass long briefs via --prompt-file (not inline)
+For any brief longer than a line or two, write it to a file and pass `--prompt-file <path>` (works in text AND agentic mode). Inline shell arguments are unsafe for briefs containing backticks, `$`, or newlines — the shell mangles them (e.g. a backticked `animation_spec` becomes command substitution and the model silently receives a brief with holes). `--prompt-file` round-trips the text exactly.
+
 ## Golden rules
 - Brief is self-contained — the delegate can't see your context.
 - TEXT first; AGENTIC only for real read/run/edit needs (100× cost).
