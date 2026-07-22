@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-21
+
+### Added
+- Per-model request timeout (`timeoutMs` in the registry); kimi set to 30 min — slow always-on-thinking reasoners legitimately exceed the 10-min default on long tasks.
+- Agent-comprehension doc fixes from a real field audit (run by the plugin itself): documented `setup --json` shape, background vs foreground output formats, status/result bridge after background dispatch, precise `--resume` semantics.
+
+### Notes
+- SiliconFlow deepseek/kimi chat routes observed hanging while GLM answers instantly (same key, valid IDs) — capacity-side; the health monitor and circuit-breaker advisories handle demotion dynamically, so routes stay as fallbacks.
+
 ## [0.6.1] - 2026-07-21
 
 ### Changed

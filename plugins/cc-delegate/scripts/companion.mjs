@@ -1139,6 +1139,7 @@ function resolveModelSelection(models, requestedModel, forcedProvider) {
       alias: modelName,
       label: registryEntry.label,
       pricing: registryEntry.pricing,
+      timeoutMs: registryEntry.timeoutMs,
       providers,
     };
   }
@@ -1385,6 +1386,7 @@ async function executeTaskRequest(job, models, request, tools) {
     try {
       const callStartedAt = Date.now();
       const response = await callProvider(candidate.name, candidate.id, messages, {
+        timeoutMs: selection.timeoutMs,
         maxTokens: request.maxTokens,
       });
       const latencyMs = Date.now() - callStartedAt;

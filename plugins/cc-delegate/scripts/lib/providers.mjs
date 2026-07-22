@@ -42,7 +42,8 @@ export async function callProvider(providerName, modelId, messages, opts = {}) {
     throw new Error(`missing API key ${provider.envKey}`);
   }
 
-  const timeoutMs = 10 * 60 * 1000;
+  // Per-model override (registry timeoutMs) for slow reasoners like Kimi K3.
+  const timeoutMs = Number(opts.timeoutMs) || 10 * 60 * 1000;
   // ponytail: hard-cap provider calls at 10 minutes to avoid orphaned workers.
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
