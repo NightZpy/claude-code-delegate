@@ -12,9 +12,10 @@ You are the orchestrator. cc-delegate runs bounded sub-tasks on cheap frontier m
 ## Preflight — check it's ready (once, before the first delegation)
 Check readiness with the slash command **`/cc-delegate:setup`** (it works anywhere — it calls the runtime via the plugin root, no PATH setup needed). Read its JSON:
 - `ready: true` with a provider `keyPresent`/`active` → text mode is good to go.
-- `ready: false` (no keys) → the user must configure a key once, in their own terminal (interactive, visible input; one OpenRouter key covers every model). Give them a command that works even if the CLI isn't linked yet:
-  `! node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/setup-keys.mjs"`
-  (or, if they've run `cc-delegate link`, simply `! cc-delegate-keys`). Until a key exists, don't delegate — do the work yourself or wait.
+- `ready: false` (no keys) → the user configures a key once. **SECURITY — the key must NOT pass through Claude Code's terminal.** Do NOT tell them to run key setup with the `! ` prefix here (the pasted key would enter this session and be visible to you). Instead tell them to do ONE of:
+  - **In their own separate terminal** (Terminal / Warp / iTerm — not this Claude Code session), run the interactive setup: `node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/setup-keys.mjs"` (or `cc-delegate-keys` if linked). One OpenRouter key covers every model.
+  - **Or edit the env file directly**, themselves: add `OPENROUTER_API_KEY=sk-or-...` to `~/.claude/cc-delegate/.env` (`chmod 600`).
+  Until a key exists, don't delegate — do the work yourself or wait. Never ask the user to paste a key into this conversation or a `! ` command.
 - Agentic: read the additive `agentic: {installed, version, serverRunning}` block. `installed: false` → tell the user `npm i -g opencode-ai` enables `--agentic`; stick to text mode meanwhile.
 
 **Short CLI vs slash commands.** Inside Claude Code, prefer the slash commands (`/cc-delegate:task`, `:usage`, `:status`, …) — they always work. The bare `cc-delegate …` shell commands shown later only exist after a one-time `cc-delegate link` (installs wrappers to `~/.local/bin`, which must be on PATH). If `cc-delegate: command not found`, either run link once (`! node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/companion.mjs" link`) or just use the slash commands.

@@ -9,15 +9,15 @@ allowed-tools: Bash(node:*)
 Present the setup output to the user. Each provider may include a `quota` object (`monthlyUsd`, `spentThisMonth`, `pct`, `level`) when a monthly spend quota is configured — mention it next to the key status, and flag `level: "warning"`/`"critical"` clearly.
 
 If any required API key (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA_API_KEY`, `CEREBRAS_API_KEY`) is missing or the result reports `ready: false`:
-- Tell the user to run the interactive key setup themselves, in their own terminal, since it needs their input. Give the link-independent form (works even if they never ran `cc-delegate link`):
+- **SECURITY: the API key must never pass through this Claude Code terminal.** Do NOT instruct the user to run key setup with a `! ` prefix here, and never ask them to paste a key into this conversation — it would be visible to the model. Tell them to do it in their OWN separate terminal (Terminal / Warp / iTerm), running the link-independent command (works even without `cc-delegate link`):
 
 ```
-! node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/setup-keys.mjs"
+node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/setup-keys.mjs"
 ```
 
-(If they have run `cc-delegate link`, `! cc-delegate-keys` also works.) One OpenRouter key covers every model.
+(or `cc-delegate-keys` if they've linked the CLI). Alternatively they can add `OPENROUTER_API_KEY=sk-or-...` directly to `~/.claude/cc-delegate/.env` (chmod 600). One OpenRouter key covers every model.
 
-- Do not run `setup-keys.mjs` yourself — it is interactive and must be run by the user.
+- Do not run `setup-keys.mjs` yourself — it is interactive and must be run by the user, outside this session.
 
 The `--json` output has this shape (do not guess other field names):
 

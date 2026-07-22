@@ -41,8 +41,15 @@ Now `cc-delegate` and `cc-delegate-keys` work from any terminal.
 
 `cc-delegate-keys` walks you through the keys. **A single OpenRouter key covers every model in the fleet.** SiliconFlow is optional.
 
+> **Run this in your own terminal — NOT inside a Claude Code `!` command.** The key must not pass through an agent's session. Keys are stored only in `~/.claude/cc-delegate/.env` (chmod 600) and never leave your machine except as the `Authorization` header to the provider you configured.
+
 ```
-! cc-delegate-keys
+cc-delegate-keys        # in Terminal / Warp / iTerm, not in Claude Code
+```
+
+Prefer not to use the CLI? Add the line directly to `~/.claude/cc-delegate/.env`:
+```
+OPENROUTER_API_KEY=sk-or-...
 ```
 
 ### AGENTIC mode (additionally)

@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.6] - 2026-07-22
+
+### Security
+- Key-setup guidance no longer routes API keys through the Claude Code terminal: the `using-cc-delegate` skill, `/cc-delegate:setup`, and the README now direct the user to run key setup in a SEPARATE terminal (or edit `~/.claude/cc-delegate/.env` directly), never via a `! ` command where the pasted key would be visible to the model.
+
 ## [0.11.5] - 2026-07-22
 
 ### Fixed
