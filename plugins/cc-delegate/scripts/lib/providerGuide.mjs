@@ -168,12 +168,7 @@ export function renderProviderGuide(models, styles, columns = 100) {
     lines.push(styles.dim(`▎ ${name}: ${VERDICTS[name] || "no verdict on file"}`));
   }
 
-  lines.push(
-    "",
-    styles.dim(
-      "Roadmap: agentic mode (full Claude Code harness) will use native DeepSeek/Moonshot keys — not implemented yet; these keys cover text delegation only.",
-    ),
-  );
+  lines.push("", styles.dim("Delegations are direct text-completion calls to the provider APIs."));
 
   return lines.join("\n");
 }
