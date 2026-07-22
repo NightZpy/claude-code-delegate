@@ -16,3 +16,17 @@ If any required API key (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA
 ```
 
 - Do not run `setup-keys.mjs` yourself — it is interactive and must be run by the user.
+
+The `--json` output has this shape (do not guess other field names):
+
+```json
+{
+  "ready": true,
+  "envFile": "~/.claude/cc-delegate/.env",
+  "providers": {
+    "openrouter": { "keyPresent": true, "keyHint": "sk-or-v1…faee", "active": true, "quota": { "monthlyUsd": 25, "spentThisMonth": 0.01, "pct": 0, "level": "ok" } }
+  }
+}
+```
+
+`ready` is true when at least one key is present. `active` means the provider serves at least one model in the registry. `quota` appears only when a monthly quota is configured. `keyHint` is masked (never the full key).

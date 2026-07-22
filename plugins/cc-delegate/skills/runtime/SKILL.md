@@ -18,7 +18,7 @@ Execution rules:
 - Never invoke `task-worker` directly — it is an internal implementation detail of `task --background`.
 
 Available flags on `task`:
-- `--background` — run the delegated task asynchronously and print a `jobId` instead of waiting for the result.
+- `--background` — run the delegated task asynchronously. Prints a pretty-printed JSON object containing `"jobId"` (multi-line — parse it as JSON, do not grep single lines). Foreground tasks print the model response as plain text unless `--json` is passed.
 - `--model <alias>` — route to a specific model alias (`qwen`, `kimi`, `deepseek`, `glm`).
 - `--provider <openrouter|siliconflow|deepinfra|cerebras>` — pin a specific provider.
 - `--file <path>` (repeatable) — inline a file's contents as context.
@@ -26,7 +26,7 @@ Available flags on `task`:
 - `--system <txt>` — override the system prompt.
 - `--max-tokens N` — cap output tokens.
 - `--prompt-file <path>` — read the prompt from a file instead of the CLI argument.
-- `--resume <jobId|last>` — continue a prior completed job's conversation instead of starting a new thread; `last` resumes the most recent job.
+- `--resume <jobId|last>` — continue a previous delegation thread: resends the stored conversation plus your new prompt to the same model. Only a `completed` job can be resumed (`failed`/`cancelled` cannot; `last` = most recently completed job in this workspace). The `jobId` comes from the background dispatch JSON or from `status`.
 - `--json` — emit machine-readable output.
 
 Command selection:
