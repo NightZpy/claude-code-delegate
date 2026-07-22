@@ -10,7 +10,7 @@ Token economics. In a planner/executor split, the planner (Claude) reads the rep
 
 ## Features
 
-- **Model fleet with provider fallback chains** — five models, each mapped to one or more providers; a failing provider falls through to the next one that serves that model.
+- **Model fleet with provider fallback chains** — six models, each mapped to one or more providers; a failing provider falls through to the next one that serves that model.
 - **Background jobs** — detached processes with disk-persisted state, so `status`/`result`/`cancel` work from a later, unrelated Claude Code turn.
 - **Usage ledger + interactive tabbed TUI** — `Overview` / `Details` / `Health` / `Quotas` / `Analyze` tabs; `←`/`→` or `1`-`5` to switch, `r` to reload, `q`/Esc/Ctrl-C to exit.
 - **Per-request details & provider health** — success rate, p95 latency, fallback rate, and `⚠` WARNs per model and per provider.
@@ -36,7 +36,7 @@ Reload Claude Code, then optionally:
 ! cc-delegate-keys     # interactive key + quota setup
 ```
 
-`cc-delegate-keys` walks you through all four provider keys, but you don't need all of them — a single OpenRouter key alone covers all five models in the fleet.
+`cc-delegate-keys` walks you through the active provider keys, but you don't need all of them — a single OpenRouter key alone covers every model in the fleet.
 
 ## Model matrix
 
@@ -78,7 +78,7 @@ Data from research as of July 2026.
 ```
 cc-delegate setup [--json]
 cc-delegate models [--guide] [--json]
-cc-delegate task [--background] [--model qwen|kimi|deepseek|glm|grok] [--provider openrouter|siliconflow|deepinfra|cerebras]
+cc-delegate task [--background] [--model qwen|deepseek|deepseek-pro|glm|kimi|grok] [--provider openrouter|siliconflow]
                [--file <path>]... [--diff] [--system <txt>] [--max-tokens N] [--prompt-file <path>]
                [--resume <jobId|last>] [--json] "<prompt>"
 cc-delegate status [job-id] [--all] [--json]
