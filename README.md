@@ -1,30 +1,24 @@
 # claude-code-delegate
 
-![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
-
-A [Claude Code](https://claude.com/claude-code) plugin marketplace. Its one plugin, `cc-delegate`, delegates bounded coding sub-tasks — boilerplate, tests, mechanical refactors, diff review, long-context analysis — from Claude Code to external frontier models (Qwen3-Coder-Next, Kimi K3, DeepSeek V4-Flash, GLM-5.2, Grok 4.5) over OpenAI-compatible APIs (OpenRouter, SiliconFlow, DeepInfra, Cerebras), so the expensive Claude context in your session is spent on planning and judgment rather than on generation. The architecture mirrors the `openai-codex` plugin: a companion runtime script, a thin forwarding subagent, and a set of slash commands.
+Delegate bounded coding sub-tasks from Claude Code to cheap frontier models (Qwen3-Coder-Next, Kimi K3, DeepSeek V4-Flash, GLM-5.2, Grok 4.5, and more) over OpenAI-compatible APIs. Claude stays in the architect’s seat — planning, reading the repo, and reviewing results — while execution work is pushed to models that cost 10–1000× less per token.
 
 ## Why
 
+Token economics. The expensive Claude context belongs on decisions, not on bulk generation. The models in the matrix below are 10–1000× cheaper and, for well-specified generation, close the quality gap. This plugin itself was largely built by delegating sub-tasks to cheap models for a total spend of about **$1.23**. A single code-writing delegation to the fleet’s cheapest model can cost as little as **$0.000013**.
 
-Where the codex plugin delegates to one model, cc-delegate operates a delegation *fleet* with cost accounting, health monitoring, spend quotas, circuit-breaker failover, a context-window guard, and an optional review gate — everything an orchestrator needs to delegate fully and safely.
+Where the `openai-codex` plugin delegates to one model, cc-delegate operates a delegation *fleet* — cost accounting, health monitoring, spend quotas, circuit-breaker failover, a context-window guard, and an optional review gate. Everything an orchestrator needs to delegate fully and safely.
 
-Token economics. In a planner/executor split, the planner (Claude) reads the repo, makes decisions, and reviews results — that's where the expensive context belongs. The executor just turns a well-specified brief into code or a diff, and that job doesn't need a frontier-tier model to do it well. The models in the matrix below are 10-1000x cheaper per token than Claude and, for bounded generation tasks, close the gap. One real logged delegation — a code-writing request routed to the cheapest model in the fleet — cost **$0.000013**. Keeping the planner on Claude and pushing bulk generation onto cheaper external models cuts the cost of large or repetitive tasks without touching the quality of the parts that actually require judgment.
+## Two modes at a glance
 
-## Features
+|                  | TEXT mode (default)                         | AGENTIC mode (`--agentic`)                         |
+| ---------------- | ------------------------------------------- | -------------------------------------------------- |
+| **How**          | Single text-completion API call             | Local OpenCode server; full tool loop              |
+| **Tools**        | None (prompt in, text out)                  | Read files, run commands, apply edits (`--write`)  |
+| **Cost**         | As low as ~$0.0001 per request              | ~100× TEXT overhead from harness tokens            |
+| **Context**      | Whatever fits in the model’s ctx window     | Same, plus ~13–14k tokens of tooling overhead      |
+| **Best for**     | Pure generation, diff review, boilerplate   | Steps that need the repo, commands, or file edits  |
 
-- **Agentic mode** — `task --agentic [--write]` runs the delegate on an OpenCode-backed harness with real tools (read files, run commands, apply edits) in the working tree.
-- **Model fleet with provider fallback chains** — six models, each mapped to one or more providers; a failing provider falls through to the next one that serves that model.
-- **Background jobs** — detached processes with disk-persisted state, so `status`/`result`/`cancel` work from a later, unrelated Claude Code turn.
-- **Usage ledger + interactive tabbed TUI** — `Overview` / `Details` / `Health` / `Quotas` / `Analyze` tabs; `←`/`→` or `1`-`5` to switch, `r` to reload, `q`/Esc/Ctrl-C to exit.
-- **Per-request details & provider health** — success rate, p95 latency, fallback rate, and `⚠` WARNs per model and per provider.
-- **Monthly spend quotas + non-blocking alerts** — per-provider USD quotas with `⚠`/`🔴` alerts; delegations are never blocked by quota.
-- **Circuit-breaker advisories** — quality-aware suggestions to switch provider or model when a (model, provider) pair looks degraded.
-- **Context-window guard** — fails fast before calling a provider if a prompt clearly won't fit, and prints a non-blocking advisory at ≥70% of the context window; a `CTX%` column tracks it per request.
-- **AI analysis via `/cc-delegate:analyze`** — a subagent reads usage/details/health JSON and produces a cost/health readout, persisted to disk and shown in the TUI's Analyze tab.
-- **Interactive hidden-input key setup** — `cc-delegate-keys` masks pasted keys as you type.
-- **Global CLI via `cc-delegate link`** — installs `cc-delegate`/`cc-delegate-keys` wrappers onto your `PATH` so both work from any terminal.
-- **Per-Claude-session usage attribution** — a `SessionStart` hook stamps each delegation with the Claude Code session that made it.
+**When to use:** Prefer TEXT for any task a self-contained brief can carry. Use AGENTIC only when the step genuinely needs to read, run, or edit within the working tree.
 
 ## Install
 
@@ -33,197 +27,204 @@ Token economics. In a planner/executor split, the planner (Claude) reads the rep
 /plugin install cc-delegate@claude-code-delegate
 ```
 
-Reload Claude Code, then optionally:
+Reload Claude Code, then optionally link the wrappers onto your PATH:
 
 ```
-! cc-delegate link    # installs the cc-delegate / cc-delegate-keys wrappers onto your PATH
-! cc-delegate-keys     # interactive key + quota setup
+! cc-delegate link
 ```
 
-`cc-delegate-keys` walks you through the active provider keys, but you don't need all of them — a single OpenRouter key alone covers every model in the fleet.
+Now `cc-delegate` and `cc-delegate-keys` work from any terminal.
+
+## Configure
+
+### TEXT mode (and AGENTIC’s API key)
+
+`cc-delegate-keys` walks you through the keys. **A single OpenRouter key covers every model in the fleet.** SiliconFlow is optional.
+
+```
+! cc-delegate-keys
+```
+
+### AGENTIC mode (additionally)
+
+The `opencode` CLI must be installed:
+
+```
+npm i -g opencode-ai
+```
+
+The same OpenRouter key is used — no new account. Verify readiness with:
+
+```
+! cc-delegate setup
+```
+
+Example output:
+
+```
+agentic: opencode v1.2.3  … ready
+openrouter: sk-or-v1-…  … ready
+```
 
 ## Model matrix
 
-Data from research as of July 2026.
+| Alias          | Model                          | ★ | Anthropic‑equivalent  | Context  | $/1M in / $/1M out |
+| -------------- | ------------------------------ | --- | --------------------- | -------- | ------------------- |
+| `qwen`         | Qwen3‑Coder‑Next               | 3   | < Sonnet 4.5          | 262 144  | $0.11 / $0.80       |
+| `kimi`         | Kimi K3                        | 5   | ≈ Opus 4.8            | 1 000 000| $3.00 / $15.00      |
+| `kimi-fast`    | Kimi K3 (fast)                 | 4   | ≈ Sonnet 5            | 1 000 000| $3.00 / $15.00      |
+| `deepseek`     | DeepSeek V4‑Flash              | 2   | ≈ Haiku 4.5           | 1 000 000| $0.09 / $0.18       |
+| `deepseek-pro` | DeepSeek V4‑Pro                | 4   | ≈ Sonnet 5 (claimed)  | 1 000 000| $0.435 / $0.87      |
+| `grok`         | Grok 4.5                       | 4   | ≈ Opus 4.8            | 500 000  | $2.00 / $6.00       |
+| `glm`          | GLM‑5.2                        | 4   | ≈ Sonnet 5            | 1 048 576| $0.79 / $2.48       |
 
-| Alias | Model (OpenRouter ID) | Role | Ctx | $/1M in/out | Quality | Rough equivalent | Notes |
-|---|---|---|---|---|---|---|---|
-| `qwen` | Qwen3-Coder-Next (`qwen/qwen3-coder-next`) | Bulk codegen, refactors, tests | 262K | $0.11 / $0.80 | 3 | ~Sonnet (low tier) / GPT-5.4 | Weak on terminal use (Terminal-Bench 36.2%) |
-| `deepseek` | DeepSeek V4-Flash (`deepseek/deepseek-v4-flash`) | Fast debugging, diff review, boilerplate | 1M | $0.09 / $0.18 | 2 | ~Haiku 4.5 / GPT-5.4-mini | Cheapest of the fleet; SiliconFlow serves the same V4-Flash as a fallback |
-| `deepseek-pro` | DeepSeek V4-Pro (`deepseek/deepseek-v4-pro`) | Flagship-grade codegen, demanding tasks | 1M | $0.435 / $0.87 | ~Sonnet 5 (claimed, unverified) | DeepSeek flagship (1.6T); claims SWE-bench 80.6% (vendor); cheaper than GLM via OpenRouter |
-| `glm` | GLM-5.2 (`z-ai/glm-5.2`) | Multi-step agentic refactoring, tool-use | 1M | $0.79 / $2.48 | 4 | ~Sonnet 5 / GPT-5.5 | Strongest independently verified result of the lot: SWE-bench Pro 62.1%, #1 open-weight (Morph LLM); Artificial Analysis Index 51 |
-| `grok` | Grok 4.5 (`x-ai/grok-4.5`) | Frontier generalist, second opinions | 500K | $2.00 / $6.00 | 4 | ~Opus 4.8 / GPT-5.5 | xAI's latest (Jul 2026); OpenRouter only in v1 |
-| `kimi` | Kimi K3 (`moonshotai/kimi-k3`) | Long-context auditing, deep reasoning | 1M | $3.00 / $15.00 | 5 | ~Opus 4.8 / GPT-5.5 | Artificial Analysis Index 57 (#4 global); expensive, slow (34 tok/s), always-on thinking is billed, frequent 429s |
+**Benchmark caveat:** Most vendor SWE‑bench numbers above 75% are self‑reported. The only independently verified result is GLM‑5.2’s SWE‑bench Pro 62.1% (morphlm‑verified).
 
-**Benchmark caveat:** most of the vendor-reported SWE-bench figures above 75% for these models are self-reported and not confirmed on neutral leaderboards. The only independently verified number here is GLM-5.2's SWE-bench Pro result (62.1%, morphllm-verified).
+## Usage
 
-## Agentic mode
-
-Text mode (the default) is prompt in, text out — the external model has no tools. Agentic mode runs the delegate on an OpenCode-backed harness with real tools in the working tree, for steps that genuinely need repo access or command execution.
-
-Requires the `opencode` CLI:
-
-`cc-delegate setup` reports whether `opencode` is available; a missing binary fails with an error explaining the install.
-
-Examples:
-
-When to use:
-
-| Use text mode (default) | Use agentic mode |
-|---|---|
-| Boilerplate, codegen, test writing | Step must read files across the repo |
-| Diff review, long-context analysis | Step must run commands (tests, linters, builds) |
-| Anything a self-contained brief can carry | Step must apply edits to the working tree (`--write`) |
-
-Rules of thumb: never use agentic mode for trivial generation; keep it read-only unless edits are wanted. Agentic runs are read-only by default — `--write` enables file edits.
-
-Cost: the agentic harness adds ~13-14k input tokens of overhead per call — roughly 100x a text call. Ledger rows record agentic runs as `mode: "agentic"` with the actual billed cost, so `cc-delegate usage --details` shows exactly what each run spent.
-
-Sessions: agentic `--resume` reuses the native OpenCode session, so follow-ups keep full tool-call history.
-
-Manage the OpenCode backend directly with:
+### TEXT mode examples
 
 ```
-cc-delegate opencode status|stop
+/cc-delegate:task "write unit tests for src/parser.ts"
+/cc-delegate:deepseek "review this commit for security bugs" --diff
+/cc-delegate:glm "refactor this module to async/await" --file src/**/*.ts
+/cc-delegate:task --model kimi-fast --background "run a full audit of all auth paths"
 ```
 
+Background tasks can be checked with `/cc-delegate:status`, fetched with `/cc-delegate:result`, and cancelled with `/cc-delegate:cancel`. Resume a previous thread:
 
-## Commands
+```
+/cc-delegate:task --resume last "add edge‑case tests for the invalid‑input flow"
+```
+
+### AGENTIC mode examples
+
+```
+/cc-delegate:task --agentic --model deepseek \
+  "read the error handling in api/routes.ts and rewrite it to use Either"
+/cc-delegate:task --agentic --write "apply the casing fixes I described in docs/naming.md"
+```
+
+Resume reuses the native OpenCode session, retaining full tool‑call history. Manage the OpenCode backend directly:
+
+```
+cc-delegate opencode status
+cc-delegate opencode stop
+```
+
+## Commands reference
 
 ### Slash commands
 
-| Command | Description | Example |
-|---|---|---|
-| `/cc-delegate:task` | Delegate a task, picking model/provider explicitly | `/cc-delegate:task --model glm "refactor this module to use async/await"` |
-| `/cc-delegate:qwen` | Delegate to Qwen3-Coder-Next | `/cc-delegate:qwen "write unit tests for src/parser.ts"` |
-| `/cc-delegate:kimi` | Delegate to Kimi K3 | `/cc-delegate:kimi --file src/**/*.ts "audit this module for race conditions"` |
-| `/cc-delegate:deepseek-pro` | Delegate to DeepSeek V4-Pro | `/cc-delegate:deepseek-pro "implement the parser module"` |
-| `/cc-delegate:deepseek` | Delegate to DeepSeek V4-Flash | `/cc-delegate:deepseek --diff "review this diff for bugs"` |
-| `/cc-delegate:glm` | Delegate to GLM-5.2 | `/cc-delegate:glm "migrate this file from class components to hooks"` |
-| `/cc-delegate:grok` | Delegate to Grok 4.5 | `/cc-delegate:grok "second opinion on this design"` |
-| `/cc-delegate:status` | Check a background job's status | `/cc-delegate:status <jobId>` |
-| `/cc-delegate:result` | Fetch a finished background job's output | `/cc-delegate:result <jobId>` |
-| `/cc-delegate:cancel` | Cancel a running background job | `/cc-delegate:cancel <jobId>` |
-| `/cc-delegate:usage` | Show aggregated token and cost usage (`--details` for per-request rows, `--health` for reliability) | `/cc-delegate:usage --days 7 --model qwen --session current` |
-| `/cc-delegate:review` | Delegated correctness review of the working-tree diff (structured verdict) | `/cc-delegate:review "focus on the parser"` |
-| `/cc-delegate:adversarial-review` | Adversarial review — actively tries to break the change | `/cc-delegate:adversarial-review` |
-| `/cc-delegate:analyze` | Feed usage/details/health JSON to a subagent for cost and health recommendations | `/cc-delegate:analyze --days 7` |
-| `/cc-delegate:setup` | Check readiness (keys present, providers reachable) | `/cc-delegate:setup` |
+| Command | Description |
+| --- | --- |
+| `/cc-delegate:task` | Delegate a bounded coding sub‑task (model / provider picked explicitly) |
+| `/cc-delegate:qwen` | Delegate to Qwen — high‑volume codegen, refactors and test writing |
+| `/cc-delegate:kimi` | Delegate to Kimi — long‑context audit and deep reasoning |
+| `/cc-delegate:kimi-fast` | Delegate to Kimi (fast) — faster, cheaper deep‑model calls |
+| `/cc-delegate:deepseek` | Delegate to DeepSeek — fast debugging and diff review |
+| `/cc-delegate:deepseek-pro` | Delegate to DeepSeek V4‑Pro — flagship‑grade codegen at low cost |
+| `/cc-delegate:glm` | Delegate to GLM — multi‑step agentic refactors |
+| `/cc-delegate:grok` | Delegate to Grok — frontier generalist reasoning and coding second opinions |
+| `/cc-delegate:status` | Show active / recent delegation jobs for this repository |
+| `/cc-delegate:result` | Show the stored final output for a finished job |
+| `/cc-delegate:cancel` | Cancel an active background delegation job |
+| `/cc-delegate:usage` | Show token and cost usage of delegations (interactive TUI when piped) |
+| `/cc-delegate:review` | Run a rigorous correctness review on the working‑tree changes |
+| `/cc-delegate:adversarial-review` | Adversarial review — actively try to break the change |
+| `/cc-delegate:analyze` | Run a cost / spend analysis with text‑vs‑agentic split |
+| `/cc-delegate:setup` | Check runtime readiness and which provider API keys are configured |
 
-### CLI (`companion.mjs`, or `cc-delegate` after `cc-delegate link`)
+### CLI subcommands (after `cc-delegate link`)
 
-```
-cc-delegate setup [--json]
-cc-delegate models [--guide] [--json]
-cc-delegate task [--background] [--model qwen|deepseek|deepseek-pro|glm|kimi|grok] [--provider openrouter|siliconflow]
-               [--file <path>]... [--diff] [--system <txt>] [--max-tokens N] [--prompt-file <path>]
-               [--resume <jobId|last>] [--json] "<prompt>"
-cc-delegate status [job-id] [--all] [--json]
-cc-delegate result [job-id] [--json]
-cc-delegate cancel [job-id]
-cc-delegate usage [--days N] [--model X] [--session <id|current>] [--json]
-cc-delegate usage --details [--model X] [--provider Y] [--limit N] [--days N] [--session <id|current>] [--json]
-cc-delegate usage --health [--days N] [--session <id|current>] [--json]
-cc-delegate analysis show [--json]
-cc-delegate link
-```
+| Subcommand | Description |
+| --- | --- |
+| `setup` | Check runtime readiness |
+| `models` | Print model matrix (`--guide` for provider guide) |
+| `task` | Dispatch a delegation (accepts `--agentic`, `--write`, `--background`, etc.) |
+| `status` | Show job status |
+| `result` | Print a finished job’s output |
+| `cancel` | Cancel a running job |
+| `usage` | Print aggregated usage or launch the TUI |
+| `review` | Run a correctness review (CLI‑friendly) |
+| `adversarial-review` | Run an adversarial review |
+| `analysis` | Show or save an analysis |
+| `gate` | Set review‑gate policy (`off`, `warn`, `enforce`) |
+| `opencode` | Manage the agentic OpenCode backend (`status`, `stop`) |
+| `link` | Install the global `cc-delegate` / `cc-delegate-keys` wrappers |
+| `uninstall` | Stop the OpenCode server and remove wrappers (`--purge` also deletes data) |
 
-`models --guide` prints the same provider price/verdict guide shown at the top of `cc-delegate-keys`. `analysis save` is written internally by `/cc-delegate:analyze`; `analysis show` reprints the last saved analysis standalone.
+## Review & gate
 
-## Iterative direction (threads)
+- `/cc-delegate:review` runs a structured correctness review on the current working‑tree diff, returning a JSON verdict (pass / changes‑needed / fail).
+- `/cc-delegate:adversarial-review` takes an adversarial stance, actively trying to break the change.
 
-A completed task's full conversation (system + user + assistant, text only) is persisted on its job. `task --resume <jobId|last>` appends a new user turn to that history and re-sends the whole thread to the same model, instead of starting a fresh, context-free task each time:
+`cc-delegate gate` controls what happens before Claude finishes the turn:
 
-```
-cc-delegate task "add input validation to src/parser.ts"
-cc-delegate task --resume last "now add unit tests for the invalid-input cases"
-cc-delegate task --resume last "also handle empty-string input"
-```
+| Setting     | Behaviour |
+| ----------- | --------- |
+| `off`       | No pre‑finish check |
+| `warn`      | Show the review verdict, but allow the turn to finish |
+| `enforce`   | Block finishing until the latest review returns `pass` |
 
-`--resume last` resumes the most recently completed job; a job id (or unambiguous prefix) resumes that job specifically. Only a `completed` job can be resumed — resuming a `failed` or `cancelled` job is a clear error. `status`/`result` show `resumedFrom` on a resumed job's output (`--json` too). An explicit `--model` that differs from the base job's model starts the new job without history (logged) rather than silently mixing conversations across models.
+When `enforce` is active, the Stop hook halts the turn until a passing review is available.
 
-## Monitoring & cost control
+## Monitoring
 
-Run `cc-delegate usage` with no flags in a terminal and it opens the interactive tabbed viewer (Overview / Details / Health / Quotas / Analyze) instead of printing static text. Any view flag (`--details`, `--health`, `--json`) or `--static` forces plain scriptable output — that's what `/cc-delegate:usage` always uses, since it runs over a pipe (never a TTY).
+- **TUI:** `cc-delegate usage` (without flags) opens an interactive tabbed viewer — Overview / Details / Health / Quotas / Analyze. `←`/`→` or `1`‑`5` switch tabs, `m` filters by mode (text / agentic), `r` reloads, `q`/Esc exits.
+- **Ledger:** Every provider response appends a JSONL record to `~/.claude/cc-delegate/usage.jsonl` — job id, model, provider, tokens, cost, latency, context‑window usage, and mode.
+- **Quotas:** `cc-delegate-keys` sets optional monthly USD caps per provider. Crossing 80% shows `⚠`, 100% `🔴`. Informational only — delegations are never blocked.
+- **Circuit‑breaker:** After each task the runtime checks (model, provider) health over the last 20 entries. A degraded pair prepends a `⚡ circuit‑breaker advisory` with ranked fallback suggestions.
+- **Context guard:** Fails fast if the prompt clearly exceeds the model’s context window; warns at ≥70% usage with `⚠ context`.
+- **Spend split:** The TUI’s Overview and `cc-delegate usage --details --json` report text‑vs‑agentic cost separately.
 
-- **Ledger**: every provider response appends one JSONL record to `~/.claude/cc-delegate/usage.jsonl` — job id, model, provider, tokens, cost, latency, `ctxPct`, status.
-- **Health**: `--health` aggregates success rate, average/p95 latency, fallback rate, and average cost per model and per provider, printing `⚠` when a model or provider looks unhealthy (success rate under 80% over 5+ requests, p95 latency over 60s, or fallback rate over 30%).
-- **Quotas**: `cc-delegate-keys` prompts for an optional monthly USD quota per provider (config in `~/.claude/cc-delegate/config.json`); crossing 80% prints a `⚠` warning, 100%+ a `🔴` critical alert. Quotas are informational only — delegations are never blocked.
-- **Circuit-breaker advisories**: after each task, the runtime checks the health of the (model, provider) pair that served it over its last 20 ledger entries; a degraded pair prepends a `⚡ circuit-breaker advisory` to the task output with ranked suggestions (same model via another provider first, then other models of equal-or-higher `quality`).
-- **Context-window guard**: the runtime estimates the assembled prompt's token count against the chosen model's context size. A prompt that clearly won't fit fails fast, before any provider/key check, with suggestions for models with a large-enough window; crossing 70% prints a non-blocking `⚠ context` advisory instead.
+## Codex equivalence
 
-**Note for orchestrators:** task outputs may carry circuit-breaker and context advisories — honor them on the next dispatch rather than retrying the same (model, provider) pair blind.
+Migrating from [codex‑plugin‑cc](https://github.com/openai/codex-plugin-cc):
 
-## Security
+| codex‑plugin‑cc        | cc‑delegate                    |
+| ---------------------- | ------------------------------ |
+| `/codex:rescue`        | `/cc-delegate:task`            |
+| `/codex:review`        | `/cc-delegate:review`          |
+| `/codex:adversarial-review` | `/cc-delegate:adversarial-review` |
+| `/codex:status`        | `/cc-delegate:status`          |
+| `/codex:result`        | `/cc-delegate:result`          |
+| `/codex:cancel`        | `/cc-delegate:cancel`          |
+| `/codex:setup`         | `/cc-delegate:setup`           |
 
-- Keys live only in `~/.claude/cc-delegate/.env`, written with `chmod 600`, and are never committed to any repo.
-- `cc-delegate-keys` uses hidden input — pasted keys are masked as you type.
-- Anywhere a key is displayed (setup output, TUI), it's shown as a masked hint (`first8…last4`), never in full.
-- Nothing leaves your machine except the API calls to the provider(s) you configured — no telemetry, no third-party relay beyond the provider itself.
+What cc‑delegate adds over codex:
+- A whole model **fleet** with cost‑tiered aliases
+- **Fallback** across providers
+- **Cost accounting** with text/agentic split
+- **Health** monitoring per model/provider
+- **Spend quotas** and alerts
+- **Circuit‑breaker** advisories
+- **Context‑window guard**
+- **Agentic mode** that mirrors codex’s tool delegation — but uses your own OpenRouter key and cheap external models
 
 ## How it works
 
-All commands and the `cc-delegate:runner` agent forward to a single companion runtime, `plugins/cc-delegate/scripts/companion.mjs`. Background jobs run as a detached process with state persisted to disk under `~/.claude/cc-delegate/`, so `status`/`result`/`cancel` can be called from a later, unrelated Claude Code turn. `--file` and `--diff` read local content and fold it into the prompt sent to the external model — the model itself has no filesystem or tool access. Each model alias maps to one or more providers; if the pinned or default provider fails, the runtime retries against the next one that serves that model.
+A single companion runtime (`plugins/cc-delegate/scripts/companion.mjs`) handles every slash command and CLI subcommand. Background jobs detach and persist state in `~/.claude/cc-delegate/`, so monitoring works across restarts. TEXT mode sends a prompt to a provider API and returns text. AGENTIC mode launches a local OpenCode server that the runtime drives with tool‑use instructions; the server stops when idle. All usage lands in the JSONL ledger.
 
-v1 is text-in/text-out: the external model has no tools and returns code or patches as text, which Claude then applies and verifies. There is no agentic loop in this version.
+## Using with plan‑big‑execute‑small
 
-```
-claude-code-delegate/
-  .claude-plugin/
-    marketplace.json
-  plugins/
-    cc-delegate/
-      .claude-plugin/
-        plugin.json
-      agents/
-        runner.md                   # thin forwarder subagent
-      commands/
-        task.md, qwen.md, kimi.md, deepseek.md, glm.md, grok.md
-        status.md, result.md, cancel.md, usage.md, analyze.md, setup.md
-      hooks/
-        hooks.json                  # SessionStart hook to persist Claude session id
-      config/
-        models.json                 # model/provider/pricing registry
-      scripts/
-        companion.mjs                # runtime: setup, models, task, status, result, cancel, usage, analysis, link
-        session-hook.mjs            # writes CC_DELEGATE_SESSION_ID into Claude env file
-        setup-keys.mjs              # interactive key + quota setup
-        lib/                        # shared helpers (provider guide, config, quota, styles, ansi)
-      skills/
-        runtime/
-          SKILL.md                  # internal call contract for runner
-```
+The [`plan-big-execute-small`](https://github.com/NightZpy/claude-skills/blob/main/plan-big-execute-small/SKILL.md) skill splits work into Claude subagents and Codex tasks. cc‑delegate adds a third, cheaper executor fleet:
+- Pure‑generation steps → TEXT mode
+- Steps needing repo access, commands, or edits → AGENTIC mode
+- Always honour circuit‑breaker and context advisories when dispatching the next step.
 
-## Using with plan-big-execute-small
+## Security
 
-The [`plan-big-execute-small`](https://github.com/NightZpy/claude-skills/blob/main/plan-big-execute-small/SKILL.md) skill already splits execution between Claude subagents and Codex. `cc-delegate` is a third, cheaper executor fleet for the same pattern: pure-generation steps that don't need tool access — bulk boilerplate, mechanical text refactors, test writing, diff review, very-long-context analysis — can go to a frontier model instead of a Claude or Codex subagent, with Claude (or a cheap subagent) still responsible for applying and verifying the output.
+- Keys live only in `~/.claude/cc-delegate/.env`, written `chmod 600`, never committed.
+- `cc-delegate-keys` uses hidden input — pasted values are masked.
+- Every display shows only a masked hint (`first8…last4`), never the full key.
+- Agentic mode’s OpenCode password file is restricted to `0600`.
+- Nothing leaves your machine except the API calls to the providers you configure.
 
-## Roadmap
-
-- Streaming output for foreground tasks.
-- Cache-aware costing: several providers already report `cachedInput` pricing in the model registry; the runtime doesn't yet use it to discount repeat-context requests.
-- Dynamic, price-aware provider ordering instead of a fixed fallback chain.
-
-## Command Mapping (codex-plugin-cc → cc-delegate)
-
-Users migrating from [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) can use this table to find the cc-delegate equivalent.
-
-| codex‑plugin‑cc | cc‑delegate | Notes |
-|---|---|---|
-| `/codex:rescue` | `/cc-delegate:task` | General delegation; use `--model <alias>` for a specific external model. |
-| `/codex:status` | `/cc-delegate:status` | Same behaviour — shows running/recent jobs. |
-| `/codex:result` | `/cc-delegate:result` | Same — fetch finished job output. |
-| `/codex:cancel` | `/cc-delegate:cancel` | Same — cancel a running job. |
-| `/codex:setup` | `/cc-delegate:setup` | Checks readiness; we check keys & connectivity instead of OpenCode server. |
-| `/codex:review` | *No direct equivalent* | Use `/cc-delegate:task --system "Review the following diff for bugs" --diff` with a model like `deepseek`. |
-| `/codex:adversarial-review` | *No direct equivalent* | Use `/cc-delegate:task --system "Act as an adversarial reviewer..." --diff` with `glm` or `grok`. |
-
-> **Note:** codex‑plugin‑cc’s `/codex:rescue` delegates to Codex (OpenAI). Our `/cc-delegate:task` delegates to the external model of your choice. The core pattern (forward prompt, return output) is identical.
-
-### Uninstall
+## Uninstall
 
 1. `/plugin uninstall cc-delegate@claude-code-delegate`
-2. Optional cleanup from your terminal: `cc-delegate uninstall` (stops the OpenCode server and removes the `~/.local/bin` wrappers; add `--purge` to also delete `~/.claude/cc-delegate` — keys, ledger and saved analyses).
+2. From the terminal: `cc-delegate uninstall` (stops the OpenCode server and removes the `~/.local/bin` wrappers; add `--purge` to also delete `~/.claude/cc-delegate` — keys, ledger, and analyses).
 
 ## Contributing
 
