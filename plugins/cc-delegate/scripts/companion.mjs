@@ -38,6 +38,8 @@ import {
   stopServer,
 } from "./lib/opencode.mjs";
 import { PROVIDERS, callProvider, fetchOpenRouterCredits, fetchProviderBalance, fetchSiliconFlowBalance } from "./lib/providers.mjs";
+import { createIsolatedWorktree, captureJobPatch, mergePatchBack } from "./lib/worktree.mjs";
+import { runOrchestration } from "./lib/orchestrate.mjs";
 import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
@@ -2104,6 +2106,67 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
 
 
 
+// --isolate wrapper: run an agentic --write job inside a throwaway git worktree
+// branched from repoDir's HEAD (carrying tracked working changes), so the job's
+// edits can't corrupt the shared tree. Afterward we capture ONLY this job's own
+// patch and merge it back, reporting a merge conflict loudly instead of clobbering.
+// Touches executeAgenticTaskRequest ZERO — it just runs with job.cwd = the worktree.
+async function runIsolatedAgentic(repoDir, job, models, request, tools) {
+  let wt;
+  try {
+    wt = await createIsolatedWorktree(repoDir);
+  } catch (err) {
+    throw new Error(`--isolate requires a git repository at ${repoDir}: ${err.message}`);
+  }
+  const originalCwd = process.cwd();
+  const jobInWt = { ...job, cwd: wt.dir };
+  process.chdir(wt.dir);
+  await tools.log(`isolated worktree ${wt.dir} (base ${wt.base.slice(0, 8)})`);
+  try {
+    const result = await executeAgenticTaskRequest(jobInWt, models, request, tools);
+    const patch = await captureJobPatch(wt);
+    if (!patch.trim()) {
+      await tools.log("isolated run produced no file changes — nothing to merge");
+      return result;
+    }
+    const merge = await mergePatchBack(repoDir, patch);
+    const files = result.result?.touchedFiles || [];
+    await tools.setJob({ jobPatch: patch, merged: merge.applied });
+    let note;
+    if (merge.applied) {
+      note = `merged ${files.length} file(s) back to the working tree: ${files.join(", ") || "(see patch)"}`;
+      await tools.log(note);
+    } else {
+      await tools.setJob({ mergeConflicts: merge.conflicts || [] });
+      note = `⚠ merge conflict — patch NOT applied to the working tree. Conflicting: ${(merge.conflicts || []).join(", ")}. The job's own patch is saved on the job (jobPatch) for manual apply.`;
+      await tools.log(note);
+    }
+    if (result.result) {
+      result.result.content = `${result.result.content || ""}\n\n[isolate] ${note}`;
+      result.result.merged = merge.applied;
+      result.result.jobPatch = patch;
+    }
+    return result;
+  } catch (err) {
+    // Salvage the job's own patch for inspection before the worktree is torn down.
+    try {
+      const patch = await captureJobPatch(wt);
+      if (patch.trim()) {
+        await tools.setJob({ jobPatch: patch });
+        await tools.log(`isolated run failed; its patch was saved on the job (jobPatch) before teardown`);
+      }
+    } catch {
+      // best-effort
+    }
+    throw err;
+  } finally {
+    if (process.cwd() !== originalCwd) {
+      try { process.chdir(originalCwd); } catch {}
+    }
+    await wt.cleanup();
+  }
+}
+
 function summarizeJobForOutput(job, progressPreview) {
   const startedAt = job.createdAt;
   const endedAt = job.completedAt || job.cancelledAt || job.updatedAt;
@@ -2373,6 +2436,7 @@ async function createTaskJob(cwd, flags, positionals) {
     conversationSeed,
     agentic: Boolean(flags.agentic),
     write: Boolean(flags.write),
+    isolate: Boolean(flags.isolate),
     opencodeSessionId,
     callTimeoutMs: flags["call-timeout"] !== undefined
       ? Number(flags["call-timeout"]) * 1000
@@ -2476,6 +2540,9 @@ async function runTask(cwd, job) {
   const models = await readModelsRegistry();
   const completed = await runTrackedJob(cwd, job.id, async (tools) => {
     if (job.request?.agentic) {
+      if (job.request.isolate && job.request.write) {
+        return runIsolatedAgentic(cwd, job, models, job.request, tools);
+      }
       return executeAgenticTaskRequest(job, models, job.request, tools);
     }
     return executeTaskRequest(job, models, job.request, tools);
@@ -2493,6 +2560,8 @@ Flags:
   --provider <name>     force a provider: openrouter|siliconflow (else the model's chain)
   --agentic             run on a local OpenCode server with real tools (read/run/edit)
   --write               (agentic) allow file edits; default is read-only
+  --isolate             (agentic --write) run in a throwaway git worktree, then
+                        merge only this job's own patch back (conflict = not applied)
   --file <path>         attach a file as context (repeatable)
   --diff                attach \`git diff HEAD\` as context
   --resume <jobId|last> continue a previous job's thread
