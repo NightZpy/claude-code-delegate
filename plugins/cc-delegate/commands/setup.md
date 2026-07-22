@@ -9,11 +9,13 @@ allowed-tools: Bash(node:*)
 Present the setup output to the user. Each provider may include a `quota` object (`monthlyUsd`, `spentThisMonth`, `pct`, `level`) when a monthly spend quota is configured — mention it next to the key status, and flag `level: "warning"`/`"critical"` clearly.
 
 If any required API key (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA_API_KEY`, `CEREBRAS_API_KEY`) is missing or the result reports `ready: false`:
-- Tell the user to run the interactive key setup themselves, in their own terminal, since it needs their input:
+- Tell the user to run the interactive key setup themselves, in their own terminal, since it needs their input. Give the link-independent form (works even if they never ran `cc-delegate link`):
 
 ```
-! cc-delegate-keys
+! node "$(ls -d ~/.claude/plugins/cache/claude-code-delegate/cc-delegate/*/ | tail -1)scripts/setup-keys.mjs"
 ```
+
+(If they have run `cc-delegate link`, `! cc-delegate-keys` also works.) One OpenRouter key covers every model.
 
 - Do not run `setup-keys.mjs` yourself — it is interactive and must be run by the user.
 

@@ -10,10 +10,14 @@ You are the orchestrator. cc-delegate runs bounded sub-tasks on cheap frontier m
 **Core economics:** the win is keeping raw material out of YOUR context. Heavy reading (large files, logs, long diffs, codebase sweeps) should happen in the delegate, which returns distilled results. If the raw material ends up back in your context, you paid to orchestrate for nothing.
 
 ## Preflight — check it's ready (once, before the first delegation)
-Run `cc-delegate setup --json` once at the start of a session that will delegate:
-- `ready: true` and at least one provider with `keyPresent`/`active` → text mode is good to go.
-- `ready: false` (no keys) → tell the user to run `! cc-delegate-keys` in their terminal once (visible-input key setup; one OpenRouter key covers every model). Until then, don't delegate — do the work yourself or wait.
-- Agentic mode: read the additive `agentic: {installed, version, serverRunning}` block. `installed: true` → `--agentic` is available; `installed: false` → tell the user `npm i -g opencode-ai` enables it, and stick to text mode meanwhile.
+Check readiness with the slash command **`/cc-delegate:setup`** (it works anywhere — it calls the runtime via the plugin root, no PATH setup needed). Read its JSON:
+- `ready: true` with a provider `keyPresent`/`active` → text mode is good to go.
+- `ready: false` (no keys) → the user must configure a key once, in their own terminal (interactive, visible input; one OpenRouter key covers every model). Give them a command that works even if the CLI isn't linked yet:
+  `! node "$(ls -d ~/.claude/plugins/cache/claude-code-delegate/cc-delegate/*/ | tail -1)scripts/setup-keys.mjs"`
+  (or, if they've run `cc-delegate link`, simply `! cc-delegate-keys`). Until a key exists, don't delegate — do the work yourself or wait.
+- Agentic: read the additive `agentic: {installed, version, serverRunning}` block. `installed: false` → tell the user `npm i -g opencode-ai` enables `--agentic`; stick to text mode meanwhile.
+
+**Short CLI vs slash commands.** Inside Claude Code, prefer the slash commands (`/cc-delegate:task`, `:usage`, `:status`, …) — they always work. The bare `cc-delegate …` shell commands shown later only exist after a one-time `cc-delegate link` (installs wrappers to `~/.local/bin`, which must be on PATH). If `cc-delegate: command not found`, either run link once (`! node "$(ls -d ~/.claude/plugins/cache/claude-code-delegate/cc-delegate/*/ | tail -1)scripts/companion.mjs" link`) or just use the slash commands.
 
 Don't re-check per task — once per session is enough.
 
