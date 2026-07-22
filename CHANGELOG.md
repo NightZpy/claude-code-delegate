@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-22
+
+### Changed
+- `using-cc-delegate` skill: added the three-tier delegation intensity (high-power/balanced/economy driven by Claude usage) and re-grounded model selection in the Anthropic-equivalence table (map the step to a Claude tier → cheapest cc-delegate model at that tier, with prices).
+
 ## [0.11.0] - 2026-07-22
 
 ### Added

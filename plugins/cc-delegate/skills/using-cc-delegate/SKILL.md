@@ -9,6 +9,15 @@ You are the orchestrator. cc-delegate runs bounded sub-tasks on cheap frontier m
 
 **Core economics:** the win is keeping raw material out of YOUR context. Heavy reading (large files, logs, long diffs, codebase sweeps) should happen in the delegate, which returns distilled results. If the raw material ends up back in your context, you paid to orchestrate for nothing.
 
+## 0. Delegation intensity — scale it to your Claude budget
+How much you delegate should track how close you are to your Claude Code usage limit (and how few days to reset). You can't read your exact `/usage`, so infer it from harness usage warnings and what the user tells you.
+
+- **High-power** (plenty of budget): do the substantive work yourself; delegate only clear wins — bulk boilerplate, mechanical transforms, and long-material reads that would bloat your context.
+- **Balanced** (default): you orchestrate and do the genuinely hard thinking; delegate all bounded execution, standard codegen, refactors, tests, diff review, and heavy reads.
+- **Economy** (near the limit / warnings): delegate everything that possibly can be — even judgment steps go to `kimi`/`deepseek-pro` with all material via `--file`; you drop to minimal supervisor (plan once, read distilled results, short verdicts) to make the plan last until reset.
+
+Claude Code stays the orchestrator and the thinker for the hardest parts in every tier; only the amount pushed down changes.
+
 ## 1. Should you delegate at all?
 Delegate bounded, well-specifiable steps. Keep architecture calls, ambiguous specs, security-critical judgment, and anything needing your full session context.
 
@@ -25,18 +34,17 @@ Delegate bounded, well-specifiable steps. Keep architecture calls, ambiguous spe
 
 **Rule:** if a brief + the files/diffs you attach suffice, use TEXT. Reach for AGENTIC only when the step genuinely needs read/run/edit on disk. `--write` only when edits are wanted (default is read-only).
 
-## 3. WHICH model — cheapest that clears the bar
-| Task type | Model | Tier |
-|---|---|---|
-| Bulk boilerplate, cheap debugging, diff review | `deepseek` | ~Haiku |
-| High-volume codegen, refactors, tests | `qwen` | ~Sonnet (low) |
-| Demanding codegen at best price | `deepseek-pro` | ~Sonnet 5 |
-| Agentic/complex refactor, tool use | `glm` | ~Sonnet 5 |
-| Fast deep reasoning, long-context audit | `kimi-fast` | ~Sonnet 5 |
-| Hardest judgment, security audit (expensive — reserve it) | `kimi` | ~Opus 4.8 |
-| Second opinion / generalist | `grok` | ~Opus |
+## 3. WHICH model — map the task to a Claude tier, then pick the cheapest model at that tier
+The base is the Anthropic-equivalence of each model (same table `cc-delegate models` prints). First ask "what Claude model would this step need?", then pick the cheapest cc-delegate model at that capability tier. `$` = per 1M tokens in/out.
 
-Start at the cheapest plausible tier; escalate only on a clear quality gap. Reserve `kimi` (full thinking) for what only an Opus-class model could do.
+| If the step needs… | Claude equiv | Model(s) — cheapest first | $ in/out |
+|---|---|---|---|
+| Cheap bulk: boilerplate, mechanical edits of provided code, quick debug, diff review | **Haiku 4.5** | `deepseek` | $0.09 / $0.18 |
+| High-volume codegen / refactors / tests (below-Sonnet is fine) | just under Sonnet | `qwen` | $0.11 / $0.80 |
+| Solid Sonnet-grade work: non-trivial codegen, real refactors, larger suites | **Sonnet 5** | `deepseek-pro` → `glm` (agentic/tool-use) → `kimi-fast` (fast deep reasoning) | $0.44/$0.87 · $0.79/$2.48 · $3/$15 |
+| Opus-grade judgment: hardest reasoning, security audits, ambiguous specs | **Opus 4.8** | `grok` (cheaper) → `kimi` (deepest, reserve it) | $2/$6 · $3/$15 |
+
+Rules: (1) pick the **cheapest model at the needed tier** — `deepseek-pro` before `glm` before `kimi-fast` for Sonnet-grade; `grok` before `kimi` for Opus-grade. (2) Don't over-buy: use an Opus-tier model only when the step truly needs Opus-level judgment. (3) Context: all except `qwen` (262K) and `grok` (500K) carry ~1M — for very long inputs prefer a 1M model. (4) `kimi` full-thinking is the priciest and slowest; it's the economy-mode substitute for Fable/Opus, not an everyday choice.
 
 ## 4. Write a brief that works (prompt contract)
 Cheap models reward tight contracts far more than they reward a bigger model. For every delegation:
