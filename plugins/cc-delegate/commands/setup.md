@@ -12,7 +12,7 @@ If any required API key (`OPENROUTER_API_KEY`, `SILICONFLOW_API_KEY`, `DEEPINFRA
 - Tell the user to run the interactive key setup themselves, in their own terminal, since it needs their input. Give the link-independent form (works even if they never ran `cc-delegate link`):
 
 ```
-! node "$(ls -d ~/.claude/plugins/cache/claude-code-delegate/cc-delegate/*/ | tail -1)scripts/setup-keys.mjs"
+! node "$HOME/.claude/plugins/cache/claude-code-delegate/cc-delegate/$(ls ~/.claude/plugins/cache/claude-code-delegate/cc-delegate | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)/scripts/setup-keys.mjs"
 ```
 
 (If they have run `cc-delegate link`, `! cc-delegate-keys` also works.) One OpenRouter key covers every model.

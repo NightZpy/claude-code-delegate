@@ -5,9 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.11.4] - 2026-07-22
+## [0.11.5] - 2026-07-22
 
 ### Fixed
+- Link-independent setup/keys paths use a semver sort (not lexical `ls|tail`, which wrongly picked 0.9.0 over 0.11.x).
 - Preflight/setup guidance no longer assumes the short `cc-delegate` CLI is linked: check readiness via the `/cc-delegate:setup` slash command, and key setup uses a link-independent `node .../setup-keys.mjs` invocation (the bare `cc-delegate-keys` only exists after `cc-delegate link`). Documented slash-vs-CLI in the skill.
 
 ## [0.11.3] - 2026-07-22
