@@ -4,6 +4,8 @@ import path from "node:path";
 import process from "node:process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import readline from "node:readline/promises";
+import { stdin as procStdin, stdout as procStdout } from "node:process";
 import { fileURLToPath } from "node:url";
 import { clipVisible } from "./lib/ansi.mjs";
 import { parseArgs } from "./lib/args.mjs";
@@ -1057,21 +1059,38 @@ function writeClippedToStdout(text) {
 
 async function usageCommand(flags) {
   if (flags.reset) {
-    // Archive the ledger and start clean. Pre-fix rows can't be recomputed
-    // retroactively (per-turn data wasn't stored), so a reset is the honest way
-    // to get an accurate dashboard going forward. The old data is kept as a .bak.
+    let existing = [];
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const backup = `${USAGE_LEDGER_FILE}.${stamp}.bak`;
-      await fs.rename(USAGE_LEDGER_FILE, backup);
-      process.stdout.write(`ledger archived to ${backup}\nusage now tracks fresh, accurate data going forward.\n`);
-    } catch (error) {
-      if (error?.code === "ENOENT") {
-        process.stdout.write("no ledger to reset — nothing recorded yet.\n");
+      existing = await readUsageLedger();
+    } catch {
+      // ignore
+    }
+    if (!existing.length) {
+      process.stdout.write("no ledger to reset — nothing recorded yet.\n");
+      return;
+    }
+    const totalCost = existing.reduce((sum, r) => sum + Number(r.cost || 0), 0);
+    const summary = `This will archive ${existing.length} ledger rows (recorded total $${totalCost.toFixed(4)}) and start the usage dashboard fresh. The old data is kept as a .bak, never deleted.`;
+    // Confirm unless --yes was passed. In a TTY, ask; otherwise require --yes.
+    if (!flags.yes) {
+      if (procStdin.isTTY && procStdout.isTTY) {
+        process.stdout.write(`${summary}\n`);
+        const rl = readline.createInterface({ input: procStdin, output: procStdout });
+        const answer = (await rl.question("Type 'reset' to confirm: ")).trim();
+        rl.close();
+        if (answer !== "reset") {
+          process.stdout.write("cancelled — nothing changed.\n");
+          return;
+        }
       } else {
-        throw error;
+        process.stdout.write(`${summary}\nRe-run with --yes to confirm (non-interactive): cc-delegate usage --reset --yes\n`);
+        return;
       }
     }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backup = `${USAGE_LEDGER_FILE}.${stamp}.bak`;
+    await fs.rename(USAGE_LEDGER_FILE, backup);
+    process.stdout.write(`ledger archived to ${backup}\nusage now tracks fresh, accurate data going forward.\n`);
     return;
   }
   if (flags.details) {
