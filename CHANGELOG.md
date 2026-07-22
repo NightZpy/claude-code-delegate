@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-07-22
+
+### Changed
+- `using-cc-delegate`: added a Preflight section — check `cc-delegate setup --json` once before delegating; if not ready, point the user to `! cc-delegate-keys` (and `npm i -g opencode-ai` for agentic) instead of failing on the first task.
+
 ## [0.11.2] - 2026-07-22
 
 ### Changed

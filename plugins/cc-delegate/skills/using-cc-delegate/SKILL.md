@@ -9,6 +9,14 @@ You are the orchestrator. cc-delegate runs bounded sub-tasks on cheap frontier m
 
 **Core economics:** the win is keeping raw material out of YOUR context. Heavy reading (large files, logs, long diffs, codebase sweeps) should happen in the delegate, which returns distilled results. If the raw material ends up back in your context, you paid to orchestrate for nothing.
 
+## Preflight — check it's ready (once, before the first delegation)
+Run `cc-delegate setup --json` once at the start of a session that will delegate:
+- `ready: true` and at least one provider with `keyPresent`/`active` → text mode is good to go.
+- `ready: false` (no keys) → tell the user to run `! cc-delegate-keys` in their terminal once (visible-input key setup; one OpenRouter key covers every model). Until then, don't delegate — do the work yourself or wait.
+- Agentic mode: read the additive `agentic: {installed, version, serverRunning}` block. `installed: true` → `--agentic` is available; `installed: false` → tell the user `npm i -g opencode-ai` enables it, and stick to text mode meanwhile.
+
+Don't re-check per task — once per session is enough.
+
 ## 0. Delegation intensity — scale it to your Claude budget
 How much you delegate should track how close you are to your Claude Code usage limit (and how few days to reset). You can't read your exact `/usage`, so infer it from harness usage warnings and what the user tells you.
 
