@@ -32,7 +32,19 @@ Delegate bounded, well-specifiable steps. Keep architecture calls, ambiguous spe
 | Cost | ~$0.0001/req | ~100× TEXT (harness overhead) |
 | Use for | Pure generation, boilerplate, tests, mechanical refactor of *provided* code, diff review, long-context analysis — anything a self-contained brief + `--file`/`--diff` carries | Steps that must traverse the repo, run commands, or apply edits in place |
 
-**Rule:** if a brief + the files/diffs you attach suffice, use TEXT. Reach for AGENTIC only when the step genuinely needs read/run/edit on disk. `--write` only when edits are wanted (default is read-only).
+**The crisp rule.** Use **AGENTIC only if you answer YES to any of these** — otherwise TEXT:
+1. The delegate must **discover which files** to touch itself (you can't name them up front).
+2. The delegate must **run commands** (tests, build, grep across the tree) to do the task.
+3. The delegate must **apply edits in place** across the repo (`--write`).
+
+If you can name the files and paste/attach them, and you only need code or a diff back, it's **TEXT** — even for multi-file work. Attaching files with `--file`/`--diff` is TEXT, not agentic; agentic is for when the model has to *explore or act on* the working tree by itself.
+
+Same task, both modes:
+- "Review this diff for bugs" → **TEXT** `--diff`. · "Find what's causing the failing test and fix it" → **AGENTIC --write** (must run the test, hunt the cause, edit).
+- "Write tests for `parser.ts`" (you attach it) → **TEXT** `--file`. · "Add tests for every exported function in `src/`" (must enumerate them) → **AGENTIC**.
+- "Rewrite this function to use Either" (pasted) → **TEXT**. · "Migrate the whole module to Either and make the build pass" → **AGENTIC --write**.
+
+`--write` only when you actually want edits applied; without it, agentic runs read-only. AGENTIC costs ~100× — never use it for what a TEXT brief + attached context can do.
 
 ## 3. WHICH model — map the task to a Claude tier, then pick the cheapest model at that tier
 The base is the Anthropic-equivalence of each model (same table `cc-delegate models` prints). First ask "what Claude model would this step need?", then pick the cheapest cc-delegate model at that capability tier. `$` = per 1M tokens in/out.

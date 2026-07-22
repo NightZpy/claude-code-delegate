@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-07-22
+
+### Changed
+- `using-cc-delegate`: sharpened the TEXT vs AGENTIC decision — a 3-question YES/NO rule (discover files? run commands? edit in place?) plus paired same-task examples, clarifying that attaching files via `--file`/`--diff` is TEXT and agentic is only for exploring/acting on the tree.
+
 ## [0.11.1] - 2026-07-22
 
 ### Changed
