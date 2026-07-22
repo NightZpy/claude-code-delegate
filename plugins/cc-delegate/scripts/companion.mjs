@@ -1056,6 +1056,24 @@ function writeClippedToStdout(text) {
 }
 
 async function usageCommand(flags) {
+  if (flags.reset) {
+    // Archive the ledger and start clean. Pre-fix rows can't be recomputed
+    // retroactively (per-turn data wasn't stored), so a reset is the honest way
+    // to get an accurate dashboard going forward. The old data is kept as a .bak.
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backup = `${USAGE_LEDGER_FILE}.${stamp}.bak`;
+      await fs.rename(USAGE_LEDGER_FILE, backup);
+      process.stdout.write(`ledger archived to ${backup}\nusage now tracks fresh, accurate data going forward.\n`);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        process.stdout.write("no ledger to reset — nothing recorded yet.\n");
+      } else {
+        throw error;
+      }
+    }
+    return;
+  }
   if (flags.details) {
     await usageDetailsCommand(flags);
     return;

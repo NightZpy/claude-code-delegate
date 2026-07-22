@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-07-22
+
+### Added
+- `usage --reset`: archive the ledger to a timestamped `.bak` and start clean. Pre-fix rows (before the 0.15.0 cost-accounting fixes) can't be recomputed retroactively — per-turn spend wasn't stored — so a reset is the honest way to get an accurate dashboard going forward. Old data is preserved as a backup, never deleted.
 ## [0.15.1] - 2026-07-22
 
 ### Fixed (cost accounting — OpenRouter reconciliation)
