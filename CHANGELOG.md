@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-22
+
+### Fixed
+- **Concurrent agentic jobs no longer kill each other.** Agentic runs now hold a run-level lock for the whole server+session+message phase (they share one OpenCode server); a second job queues instead of invalidating the first's session. Retries once on a dropped session and fails with a real message (session + URL + `--provider` hint) instead of an opaque "fetch failed".
+- `task --help` / subcommand help now prints flags (incl. `--provider`, `--agentic`, `--write`, `--resume`) instead of erroring.
+
+### Changed
+- Circuit-breaker advisories are now copy-paste actionable: each suggestion ends with `→ retry: --model X --provider Y`. Documented that `--provider <name>` forces a route (text and agentic) in the using-cc-delegate skill, plus a "be proactive — never fire-and-forget" rule (always collect/inspect background jobs; act on advisories).
+
 ## [0.11.6] - 2026-07-22
 
 ### Security

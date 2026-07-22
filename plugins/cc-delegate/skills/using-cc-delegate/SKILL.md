@@ -93,7 +93,7 @@ Background + collect + iterate:
 
 ## 6. Read the signals
 - **Cost/usage:** `/cc-delegate:usage` (TUI — tabs Overview/Details/Health/Quotas/Analyze; `g` scopes text/agentic) or `/cc-delegate:analyze` for an AI cost/health readout.
-- **Circuit-breaker advisory** in task output (`⚡ …degraded…`): the model+provider pair is unhealthy; take the ranked suggestion on your next dispatch.
+- **Circuit-breaker advisory** in task output (`⚡ …degraded…`): a model+provider pair is unhealthy. The advisory ends with the exact retry flags (`→ retry: --model X --provider Y`) — use them on your next dispatch. **`--provider <name>` forces a specific route** (e.g. `--provider siliconflow` when a model's OpenRouter route is degraded); it works in both text and agentic mode.
 - **Quota alert** (`⚠` ≥80% / `🔴` 100%): non-blocking, but slow down or switch provider.
 - **Context-guard failure:** prompt exceeds the model's window → pick a larger-context model (`kimi-fast`, `glm`, `deepseek` = 1M) or trim.
 - **Degraded/failed delegation:** report it and decide — do NOT silently redo the work yourself as if it succeeded.
@@ -102,6 +102,13 @@ Background + collect + iterate:
 - `/cc-delegate:review` → structured verdict (`pass`/`fail`) + findings on the working-tree diff; `/cc-delegate:adversarial-review` actively tries to break it.
 - `cc-delegate gate enforce` makes review mandatory (Stop hook blocks finishing until a review passes).
 - **After a review, STOP.** Present findings ordered by severity and ask which to fix. Never auto-apply review fixes, even obvious ones, without confirmation.
+
+## Be proactive — never fire-and-forget
+After you dispatch, you MUST look at the outcome before doing anything else — especially for `--background` jobs. Don't assume success.
+- Foreground: read the returned output/error immediately.
+- Background: collect with `/cc-delegate:status` then `/cc-delegate:result <id>` (or `cc-delegate watch <id>` for live activity). Don't move on or report "done" until you've confirmed each job actually completed.
+- On a **failed** job: read the error AND any `⚡` advisory, then act — re-dispatch on the healthy route (`--provider …` / a different `--model`), don't silently retry the same broken route or quietly redo the work yourself.
+- Agentic jobs are **serialized** (they share one server) — launching several at once is fine, they queue; just remember to collect all of them.
 
 ## Golden rules
 - Brief is self-contained — the delegate can't see your context.

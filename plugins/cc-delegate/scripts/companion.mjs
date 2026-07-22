@@ -21,6 +21,7 @@ import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
 import {
   checkServerHealth,
   ensureLeanAgents,
+  acquireAgenticSlot,
   listMessages,
   summarizeActivity,
   createSession,
@@ -1787,30 +1788,61 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     );
   }
 
-  await tools.log(`ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`);
-  const wroteLeanAgents = await ensureLeanAgents();
-  if (wroteLeanAgents) {
-    // New agent definitions only load at server start — restart if running.
-    try { await stopServer(CC_DELEGATE_HOME); } catch {}
-  }
-  const server = await ensureServer(CC_DELEGATE_HOME);
-
-  let sessionId = request.opencodeSessionId || null;
-  if (!sessionId) {
-    const session = await createSession(server);
-    sessionId = session.id;
-    await tools.log(`created opencode session ${sessionId}`);
-  }
-  await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
-
-  const callStartedAt = Date.now();
-  const response = await sendMessage(server, sessionId, {
-    text: request.prompt,
-    agent,
-    model: { providerID: candidate.name, modelID: candidate.id },
-    timeoutMs: selection.timeoutMs || 600000,
+  // Serialize the whole agentic run: server + session + message share one
+  // opencode server, so a concurrent job would invalidate this one's session.
+  const releaseSlot = await acquireAgenticSlot(CC_DELEGATE_HOME, {
+    onWait: () => tools.log("waiting for the agentic slot (another agentic job is running)…"),
   });
-  const latencyMs = Date.now() - callStartedAt;
+  let latencyMs;
+  let response;
+  let server;
+  let sessionId = request.opencodeSessionId || null;
+  try {
+    await tools.log(`ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`);
+    const wroteLeanAgents = await ensureLeanAgents();
+    if (wroteLeanAgents) {
+      // New agent definitions only load at server start — restart if running.
+      try { await stopServer(CC_DELEGATE_HOME); } catch {}
+    }
+    server = await ensureServer(CC_DELEGATE_HOME);
+
+    if (!sessionId) {
+      const session = await createSession(server);
+      sessionId = session.id;
+      await tools.log(`created opencode session ${sessionId}`);
+    }
+    await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
+
+    const send = async () =>
+      sendMessage(server, sessionId, {
+        text: request.prompt,
+        agent,
+        model: { providerID: candidate.name, modelID: candidate.id },
+        timeoutMs: selection.timeoutMs || 600000,
+      });
+    const callStartedAt = Date.now();
+    try {
+      response = await send();
+    } catch (firstError) {
+      // Retry once on a dropped session/connection before failing the job.
+      await tools.log(`agentic call failed (${firstError?.message || firstError}); retrying once on a fresh session`);
+      try {
+        const session = await createSession(server);
+        sessionId = session.id;
+        await tools.setJob({ opencodeSessionId: sessionId });
+        response = await send();
+      } catch (secondError) {
+        throw new Error(
+          `agentic call failed for ${selection.alias} via ${candidate.name} ` +
+            `(session ${sessionId} on ${server.base}): ${secondError?.message || secondError}. ` +
+            `If ${candidate.name} is degraded, retry with --provider <name> (see \`cc-delegate models\`) or --model <alias>.`,
+        );
+      }
+    }
+    latencyMs = Date.now() - callStartedAt;
+  } finally {
+    await releaseSlot();
+  }
   const { text, tokens, cost, modelID, providerID, reasoningTokens, cacheRead, cacheWrite, toolCalls } =
     extractText(response);
   const usage = {
@@ -2220,7 +2252,33 @@ async function runTask(cwd, job) {
   return attachHealthAdvisory(cwd, withQuota);
 }
 
+const TASK_HELP = `cc-delegate task — delegate a bounded coding sub-task to a cheap model
+
+Usage: cc-delegate task [flags] "<brief>"   (brief also via --prompt-file or stdin)
+
+Flags:
+  --model <alias>       qwen|deepseek|deepseek-pro|glm|kimi|kimi-fast|grok (default qwen)
+  --provider <name>     force a provider: openrouter|siliconflow (else the model's chain)
+  --agentic             run on a local OpenCode server with real tools (read/run/edit)
+  --write               (agentic) allow file edits; default is read-only
+  --file <path>         attach a file as context (repeatable)
+  --diff                attach \`git diff HEAD\` as context
+  --resume <jobId|last> continue a previous job's thread
+  --background          run detached; prints {jobId}; collect with status/result/watch
+  --system <text>       override the system prompt
+  --max-tokens <n>      cap output tokens
+  --json                machine-readable output
+
+Examples:
+  cc-delegate task --model deepseek --file src/x.ts "write unit tests; return the full file"
+  cc-delegate task --agentic --write --model glm "fix the failing test in api/"
+  cc-delegate task --model glm --provider siliconflow "..."   # act on a breaker advisory`;
+
 async function taskCommand(cwd, flags, positionals) {
+  if (flags.help) {
+    process.stdout.write(`${TASK_HELP}\n`);
+    return 0;
+  }
   const job = await createTaskJob(cwd, flags, positionals);
 
   if (flags.background) {

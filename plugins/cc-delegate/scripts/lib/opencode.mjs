@@ -175,6 +175,38 @@ async function acquireEnsureLock(stateDir) {
   throw new Error("timed out waiting for the opencode ensure lock");
 }
 
+// A run-level lock held for a WHOLE agentic execution (server + session +
+// message), not just the ensure phase. Two concurrent agentic jobs share one
+// opencode server on a fixed port; without this the second job's ensure/session
+// tears down the first's in-flight session and its next fetch fails. Serializes
+// agentic runs instead. ponytail: one shared server, serialized — per-job ports
+// would allow true parallelism if it ever matters.
+export async function acquireAgenticSlot(stateDir, { onWait } = {}) {
+  await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const lockFile = path.join(stateDir, "agentic-run.lock");
+  const deadline = Date.now() + 45 * 60 * 1000; // long enough for a slow kimi run
+  let warned = false;
+  while (Date.now() < deadline) {
+    try {
+      const fh = await fs.open(lockFile, "wx");
+      await fh.write(String(process.pid));
+      await fh.close();
+      return async () => { await fs.rm(lockFile, { force: true }); };
+    } catch {
+      try {
+        const st = await fs.stat(lockFile);
+        if (Date.now() - st.mtimeMs > 46 * 60 * 1000) {
+          await fs.rm(lockFile, { force: true }); // stale holder (crashed job)
+          continue;
+        }
+      } catch {}
+      if (!warned && onWait) { warned = true; await onWait(); }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  throw new Error("timed out waiting for the agentic run slot (another agentic job held it too long)");
+}
+
 export async function ensureServer(stateDir) {
   await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
   const lock = await acquireEnsureLock(stateDir);
