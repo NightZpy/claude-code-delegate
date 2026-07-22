@@ -3,7 +3,7 @@ import { sectionTitle } from "./styles.mjs";
 
 // Editorial, not computable: why each provider is/isn't worth a key.
 export const VERDICTS = {
-  openrouter: "covers all 5 models, best price for most — recommended first key",
+  openrouter: "covers every model, best price for most — recommended first key",
   siliconflow: "optional: mainly valuable as kimi fallback",
   deepinfra: "optional fallback",
   cerebras: "qwen only, ultra-fast inference",
@@ -12,7 +12,7 @@ export const VERDICTS = {
 const PROVIDER_ORDER = ["openrouter", "siliconflow", "deepinfra", "cerebras"];
 
 // Editorial ordering: cheap/bulk models first, frontier/expensive last.
-const MODEL_ORDER = ["qwen", "deepseek", "glm", "kimi", "grok"];
+const MODEL_ORDER = ["qwen", "deepseek", "deepseek-pro", "glm", "kimi", "grok"];
 
 const SEP = "  ";
 
@@ -93,7 +93,12 @@ function formatQuality(quality) {
 // Builds the "Models × providers" comparison matrix. Drops provider columns
 // right-to-left until the table fits `columns`, noting how many were cut.
 function renderMatrix(models, providerNames, styles, columns) {
-  const aliases = MODEL_ORDER.filter((alias) => models[alias]);
+  // Preferred order first, then any registry alias not in the list — a newly
+  // added model must never silently vanish from the guide.
+  const aliases = [
+    ...MODEL_ORDER.filter((alias) => models[alias]),
+    ...Object.keys(models).filter((alias) => !MODEL_ORDER.includes(alias)),
+  ];
 
   const modelFields = aliases.map((alias) => buildModelField(alias, models[alias], styles));
   const qualityFields = aliases.map((alias) => formatQuality(models[alias].quality));

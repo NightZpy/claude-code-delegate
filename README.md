@@ -46,6 +46,7 @@ Data from research as of July 2026.
 |---|---|---|---|---|---|---|---|
 | `qwen` | Qwen3-Coder-Next (`qwen/qwen3-coder-next`) | Bulk codegen, refactors, tests | 262K | $0.11 / $0.80 | 3 | ~Sonnet (low tier) / GPT-5.4 | Weak on terminal use (Terminal-Bench 36.2%) |
 | `deepseek` | DeepSeek V4-Flash (`deepseek/deepseek-v4-flash`) | Fast debugging, diff review, boilerplate | 1M | $0.09 / $0.18 | 2 | ~Haiku 4.5 / GPT-5.4-mini | Cheapest of the fleet; SiliconFlow serves the same V4-Flash as a fallback |
+| `deepseek-pro` | DeepSeek V4-Pro (`deepseek/deepseek-v4-pro`) | Flagship-grade codegen, demanding tasks | 1M | $0.435 / $0.87 | ~Sonnet 5 (claimed, unverified) | DeepSeek flagship (1.6T); claims SWE-bench 80.6% (vendor); cheaper than GLM via OpenRouter |
 | `glm` | GLM-5.2 (`z-ai/glm-5.2`) | Multi-step agentic refactoring, tool-use | 1M | $0.79 / $2.48 | 4 | ~Sonnet 5 / GPT-5.5 | Strongest independently verified result of the lot: SWE-bench Pro 62.1%, #1 open-weight (Morph LLM); Artificial Analysis Index 51 |
 | `grok` | Grok 4.5 (`x-ai/grok-4.5`) | Frontier generalist, second opinions | 500K | $2.00 / $6.00 | 4 | ~Opus 4.8 / GPT-5.5 | xAI's latest (Jul 2026); OpenRouter only in v1 |
 | `kimi` | Kimi K3 (`moonshotai/kimi-k3`) | Long-context auditing, deep reasoning | 1M | $3.00 / $15.00 | 5 | ~Opus 4.8 / GPT-5.5 | Artificial Analysis Index 57 (#4 global); expensive, slow (34 tok/s), always-on thinking is billed, frequent 429s |
@@ -61,6 +62,7 @@ Data from research as of July 2026.
 | `/cc-delegate:task` | Delegate a task, picking model/provider explicitly | `/cc-delegate:task --model glm "refactor this module to use async/await"` |
 | `/cc-delegate:qwen` | Delegate to Qwen3-Coder-Next | `/cc-delegate:qwen "write unit tests for src/parser.ts"` |
 | `/cc-delegate:kimi` | Delegate to Kimi K3 | `/cc-delegate:kimi --file src/**/*.ts "audit this module for race conditions"` |
+| `/cc-delegate:deepseek-pro` | Delegate to DeepSeek V4-Pro | `/cc-delegate:deepseek-pro "implement the parser module"` |
 | `/cc-delegate:deepseek` | Delegate to DeepSeek V4-Flash | `/cc-delegate:deepseek --diff "review this diff for bugs"` |
 | `/cc-delegate:glm` | Delegate to GLM-5.2 | `/cc-delegate:glm "migrate this file from class components to hooks"` |
 | `/cc-delegate:grok` | Delegate to Grok 4.5 | `/cc-delegate:grok "second opinion on this design"` |

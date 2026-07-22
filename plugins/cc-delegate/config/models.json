@@ -69,6 +69,32 @@
       "tier": "fast-debug",
       "notes": "Cheapest of the fleet (~Haiku tier). SiliconFlow hosts the same V4-Flash ($0.13/$0.28, pricier than OR $0.09/$0.18)."
     },
+    "deepseek-pro": {
+      "label": "DeepSeek V4-Pro",
+      "providers": [
+        {
+          "name": "openrouter",
+          "id": "deepseek/deepseek-v4-pro"
+        },
+        {
+          "name": "siliconflow",
+          "id": "deepseek-ai/DeepSeek-V4-Pro",
+          "pricing": {
+            "input": 1.50162,
+            "output": 3.135,
+            "cachedInput": 0.135
+          }
+        }
+      ],
+      "context": 1000000,
+      "pricing": {
+        "input": 0.435,
+        "output": 0.87
+      },
+      "quality": 4,
+      "tier": "flagship-codegen",
+      "notes": "DeepSeek flagship (1.6T/49B active). Claims SWE-bench 80.6% (vendor, unverified). Cheaper than GLM via OpenRouter; strong price/quality for demanding codegen."
+    },
     "grok": {
       "label": "Grok 4.5",
       "providers": [
