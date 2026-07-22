@@ -15,7 +15,8 @@
       },
       "quality": 3,
       "tier": "bulk-codegen",
-      "notes": "High-volume codegen/refactors/tests. Weak on terminal tasks (Terminal-Bench 36.2%). Cerebras route dropped (served older 480B, below Sonnet-4.5 level); Qwen3.8-Max noted for future (closed preview, no public API yet)."
+      "notes": "High-volume codegen/refactors/tests. Weak on terminal tasks (Terminal-Bench 36.2%). Cerebras route dropped (served older 480B, below Sonnet-4.5 level); Qwen3.8-Max noted for future (closed preview, no public API yet).",
+      "equivalent": "below Sonnet 4.5"
     },
     "kimi": {
       "label": "Kimi K3",
@@ -41,7 +42,8 @@
       },
       "quality": 5,
       "tier": "long-context-audit",
-      "notes": "1M ctx deep reasoning (~Opus tier). Expensive, slow (~34 tok/s), always-on thinking billed as output. SiliconFlow fallback is independent infra (OpenRouter just relays to Moonshot), same $3/$15."
+      "notes": "1M ctx deep reasoning (~Opus tier). Expensive, slow (~34 tok/s), always-on thinking billed as output. SiliconFlow fallback is independent infra (OpenRouter just relays to Moonshot), same $3/$15.",
+      "equivalent": "\u2248 Opus 4.8"
     },
     "deepseek": {
       "label": "DeepSeek V4-Flash",
@@ -67,7 +69,8 @@
       },
       "quality": 2,
       "tier": "fast-debug",
-      "notes": "Cheapest of the fleet (~Haiku tier). SiliconFlow hosts the same V4-Flash ($0.13/$0.28, pricier than OR $0.09/$0.18)."
+      "notes": "Cheapest of the fleet (~Haiku tier). SiliconFlow hosts the same V4-Flash ($0.13/$0.28, pricier than OR $0.09/$0.18).",
+      "equivalent": "\u2248 Haiku 4.5"
     },
     "deepseek-pro": {
       "label": "DeepSeek V4-Pro",
@@ -93,7 +96,8 @@
       },
       "quality": 4,
       "tier": "flagship-codegen",
-      "notes": "DeepSeek flagship (1.6T/49B active). Claims SWE-bench 80.6% (vendor, unverified). Cheaper than GLM via OpenRouter; strong price/quality for demanding codegen."
+      "notes": "DeepSeek flagship (1.6T/49B active). Claims SWE-bench 80.6% (vendor, unverified). Cheaper than GLM via OpenRouter; strong price/quality for demanding codegen.",
+      "equivalent": "\u2248 Sonnet 5 (claimed)"
     },
     "grok": {
       "label": "Grok 4.5",
@@ -110,7 +114,8 @@
       },
       "quality": 4,
       "tier": "frontier-generalist",
-      "notes": "xAI's latest (Jul 2026). Frontier coding/STEM generalist, good second-opinion model. OpenRouter only in v1."
+      "notes": "xAI's latest (Jul 2026). Frontier coding/STEM generalist, good second-opinion model. OpenRouter only in v1.",
+      "equivalent": "\u2248 Opus 4.8"
     },
     "glm": {
       "label": "GLM-5.2",
@@ -136,7 +141,8 @@
       },
       "quality": 4,
       "tier": "agentic-refactor",
-      "notes": "Best independently verified of the fleet (SWE-bench Pro 62.1%, #1 open-weight). Multi-step refactors, tool-use style output (~Sonnet 5 tier). SiliconFlow ID verified ($1.302/$4.092, pricier than OR)."
+      "notes": "Best independently verified of the fleet (SWE-bench Pro 62.1%, #1 open-weight). Multi-step refactors, tool-use style output (~Sonnet 5 tier). SiliconFlow ID verified ($1.302/$4.092, pricier than OR).",
+      "equivalent": "\u2248 Sonnet 5"
     }
   },
   "_pricingSources": {

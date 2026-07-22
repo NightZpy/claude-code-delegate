@@ -164,10 +164,30 @@ function renderMatrix(models, providerNames, styles, columns) {
   return lines.map((line) => clipVisible(line, columns));
 }
 
+// One line per model: how it maps onto the Anthropic ladder (Jul-2026 benchmarks).
+function renderEquivalents(models, styles, columns) {
+  const aliases = [
+    ...MODEL_ORDER.filter((alias) => models[alias]),
+    ...Object.keys(models).filter((alias) => !MODEL_ORDER.includes(alias)),
+  ].filter((alias) => models[alias].equivalent);
+  if (!aliases.length) {
+    return [];
+  }
+  const width = Math.max(...aliases.map((alias) => alias.length));
+  const lines = [sectionTitle("Anthropic equivalents (approx.)", styles), ""];
+  for (const alias of aliases) {
+    lines.push(`  ${styles.bold(alias.padEnd(width))}  ${styles.dim(models[alias].equivalent)}`);
+  }
+  lines.push(styles.dim("  (no open model matches Fable 5 today — closest: kimi)"));
+  return lines.map((line) => clipVisible(line, columns));
+}
+
 export function renderProviderGuide(models, styles, columns = 100) {
   const providerNames = getActiveProviders(models);
 
   const lines = [...renderMatrix(models, providerNames, styles, columns), ""];
+
+  lines.push(...renderEquivalents(models, styles, columns), "");
 
   for (const name of providerNames) {
     lines.push(styles.dim(`▎ ${name}: ${VERDICTS[name] || "no verdict on file"}`));
