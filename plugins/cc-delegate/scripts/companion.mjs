@@ -1140,6 +1140,7 @@ function resolveModelSelection(models, requestedModel, forcedProvider) {
       label: registryEntry.label,
       pricing: registryEntry.pricing,
       timeoutMs: registryEntry.timeoutMs,
+      requestParams: registryEntry.requestParams,
       providers,
     };
   }
@@ -1388,8 +1389,12 @@ async function executeTaskRequest(job, models, request, tools) {
       const response = await callProvider(candidate.name, candidate.id, messages, {
         timeoutMs: selection.timeoutMs,
         maxTokens: request.maxTokens,
+        requestParams: selection.requestParams,
       });
       const latencyMs = Date.now() - callStartedAt;
+      if (!response.usage) {
+        await tools.log(`usage not reported by provider ${candidate.name}`);
+      }
       const usage = normalizeUsage(response.usage);
       const content =
         response.choices?.[0]?.message?.content ??

@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-21
+
+### Added
+- SSE streaming for all provider calls (`stream: true` + `include_usage`) — fixes SiliconFlow edge hangs on long non-streamed generations (verified live) and guards the whole stream with the per-model timeout.
+- `kimi-fast` alias: same Kimi K3 weights with `reasoning_effort: low` — seconds instead of minutes for quick deep-model calls; `requestParams` supported per model in the registry.
+
 ## [0.7.0] - 2026-07-21
 
 ### Added

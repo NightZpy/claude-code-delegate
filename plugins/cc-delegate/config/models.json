@@ -42,9 +42,42 @@
       },
       "quality": 5,
       "tier": "long-context-audit",
-      "notes": "1M ctx deep reasoning (~Opus tier). Expensive, slow (~34 tok/s), always-on thinking billed as output. SiliconFlow fallback is independent infra (OpenRouter just relays to Moonshot), same $3/$15.",
+      "notes": "1M ctx deep reasoning (~Opus tier). Expensive, slow (~34 tok/s), always-on thinking billed as output. SiliconFlow fallback is independent infra (OpenRouter just relays to Moonshot), same $3/$15. Same K3 weights as kimi-fast; use kimi-fast for quicker/cheaper calls (thinking output is billed).",
       "equivalent": "\u2248 Opus 4.8",
-      "timeoutMs": 1800000
+      "timeoutMs": 1800000,
+      "requestParams": {
+        "reasoning_effort": "high"
+      }
+    },
+    "kimi-fast": {
+      "label": "Kimi K3 (fast)",
+      "providers": [
+        {
+          "name": "openrouter",
+          "id": "moonshotai/kimi-k3"
+        },
+        {
+          "name": "siliconflow",
+          "id": "moonshotai/Kimi-K3",
+          "pricing": {
+            "input": 3.0,
+            "output": 15.0,
+            "cachedInput": 0.3
+          }
+        }
+      ],
+      "context": 1000000,
+      "pricing": {
+        "input": 3.0,
+        "output": 15.0
+      },
+      "quality": 4,
+      "tier": "fast-reasoning",
+      "notes": "Same K3 weights as kimi, low reasoning effort \u2014 faster and cheaper than the always-on full-thinking kimi alias.",
+      "equivalent": "\u2248 Sonnet 5",
+      "requestParams": {
+        "reasoning_effort": "low"
+      }
     },
     "deepseek": {
       "label": "DeepSeek V4-Flash",

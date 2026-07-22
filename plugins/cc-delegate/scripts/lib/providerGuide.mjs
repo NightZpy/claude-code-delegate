@@ -12,7 +12,7 @@ export const VERDICTS = {
 const PROVIDER_ORDER = ["openrouter", "siliconflow", "deepinfra", "cerebras"];
 
 // Editorial ordering: cheap/bulk models first, frontier/expensive last.
-const MODEL_ORDER = ["qwen", "deepseek", "deepseek-pro", "glm", "kimi", "grok"];
+const MODEL_ORDER = ["qwen", "deepseek", "deepseek-pro", "glm", "kimi", "kimi-fast", "grok"];
 
 const SEP = "  ";
 
