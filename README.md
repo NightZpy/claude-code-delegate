@@ -44,7 +44,7 @@ Data from research as of July 2026.
 
 | Alias | Model (OpenRouter ID) | Role | Ctx | $/1M in/out | Quality | Rough equivalent | Notes |
 |---|---|---|---|---|---|---|---|
-| `qwen` | Qwen3-Coder-Next (`qwen/qwen3-coder-next`) | Bulk codegen, refactors, tests | 262K | $0.11 / $0.80 | 3 | ~Sonnet (low tier) / GPT-5.4 | Weak on terminal use (Terminal-Bench 36.2%); available on Cerebras (~2000 tok/s, vendor-claimed) |
+| `qwen` | Qwen3-Coder-Next (`qwen/qwen3-coder-next`) | Bulk codegen, refactors, tests | 262K | $0.11 / $0.80 | 3 | ~Sonnet (low tier) / GPT-5.4 | Weak on terminal use (Terminal-Bench 36.2%) |
 | `deepseek` | DeepSeek V4-Flash (`deepseek/deepseek-v4-flash`) | Fast debugging, diff review, boilerplate | 1M | $0.09 / $0.18 | 2 | ~Haiku 4.5 / GPT-5.4-mini | Cheapest of the fleet; SiliconFlow serves the same V4-Flash as a fallback |
 | `glm` | GLM-5.2 (`z-ai/glm-5.2`) | Multi-step agentic refactoring, tool-use | 1M | $0.79 / $2.48 | 4 | ~Sonnet 5 / GPT-5.5 | Strongest independently verified result of the lot: SWE-bench Pro 62.1%, #1 open-weight (Morph LLM); Artificial Analysis Index 51 |
 | `grok` | Grok 4.5 (`x-ai/grok-4.5`) | Frontier generalist, second opinions | 500K | $2.00 / $6.00 | 4 | ~Opus 4.8 / GPT-5.5 | xAI's latest (Jul 2026); OpenRouter only in v1 |
