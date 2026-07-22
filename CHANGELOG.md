@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-07-22
+
+### Fixed
+- Agentic runs now surface the provider's real error. OpenCode returns HTTP 200 with the provider error tucked in `info.error` (e.g. OpenRouter "requires more credits, or fewer max_tokens" — pricier models request ~32k output tokens and can exceed a low key balance/limit while cheap models fit). Previously this looked like a generic "empty response"; now the actual actionable message is reported. (This was mis-diagnosed as a reasoning-model parsing bug; the real cause is credit/limit + max_tokens.)
+
 ## [0.13.0] - 2026-07-22
 
 ### Fixed (agentic reliability — from two field reports)

@@ -1870,6 +1870,17 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
         }
       }
       latencyMs = Date.now() - callStartedAt;
+      // OpenCode returns HTTP 200 with the provider's error tucked in
+      // info.error (e.g. OpenRouter "requires more credits, or fewer
+      // max_tokens" for pricier models on a low balance). Surface THAT instead
+      // of the generic empty-response message — it's the real, actionable cause.
+      const ocError = response?.info?.error;
+      if (ocError) {
+        const detail = ocError?.data?.message || ocError?.message || JSON.stringify(ocError);
+        throw new Error(
+          `agentic call rejected for ${selection.alias} via ${candidate.name}: ${ocError.name || "error"} — ${detail}`,
+        );
+      }
     } catch (error) {
       // Salvage: capture any files already touched before the failure.
       let touched = [];

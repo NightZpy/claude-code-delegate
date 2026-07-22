@@ -97,6 +97,7 @@ Background + collect + iterate:
 - **Quota alert** (`⚠` ≥80% / `🔴` 100%): non-blocking, but slow down or switch provider.
 - **Context-guard failure:** prompt exceeds the model's window → pick a larger-context model (`kimi-fast`, `glm`, `deepseek` = 1M) or trim.
 - **Degraded/failed delegation:** report it and decide — do NOT silently redo the work yourself as if it succeeded.
+- **`agentic call rejected … requires more credits, or fewer max_tokens`:** not a plugin bug — agentic runs request up to ~32k output tokens, and pricier models (glm, deepseek-pro, kimi, grok) can exceed a low OpenRouter key balance/monthly limit while cheap ones (deepseek, qwen) fit. Fix by raising the key's limit / topping up, or use a cheaper agentic model. (Text mode uses far fewer tokens, so the same model works there.)
 
 ## 7. Review loop — and STOP before applying
 - `/cc-delegate:review` → structured verdict (`pass`/`fail`) + findings on the working-tree diff; `/cc-delegate:adversarial-review` actively tries to break it.
