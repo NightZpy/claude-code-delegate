@@ -51,7 +51,9 @@ function priceOf(model, provider) {
   return `${formatPrice(pricing.input)}/${formatPrice(pricing.output)}`;
 }
 
-function buildProviderCell(model, providerName, styles) {
+const FOOTNOTE_MARKS = ["¹", "²", "³", "⁴", "⁵"];
+
+function buildProviderCell(model, providerName, styles, footnotes) {
   const provider = model.providers.find((p) => p.name === providerName);
   if (!provider) {
     return styles.dim("—");
@@ -62,9 +64,18 @@ function buildProviderCell(model, providerName, styles) {
   const price = priceOf(model, provider);
   const dot = isPrimary ? `${styles.cyan("●")} ` : "";
 
+  // A diverging variant becomes a footnote instead of an inline suffix — the
+  // suffix bloated the column enough to get it dropped on ~90-col terminals.
   const variant = versionOf(provider.id);
-  const differsFromPrimary = variant.toLowerCase() !== versionOf(primary.id).toLowerCase();
-  const suffix = differsFromPrimary ? ` ${styles.dim(`(${variant})`)}` : "";
+  let suffix = "";
+  if (variant.toLowerCase() !== versionOf(primary.id).toLowerCase()) {
+    const note = `${providerName} serves ${variant} (different variant)`;
+    let index = footnotes.indexOf(note);
+    if (index === -1) {
+      index = footnotes.push(note) - 1;
+    }
+    suffix = ` ${styles.dim(FOOTNOTE_MARKS[index] || "*")}`;
+  }
 
   return `${dot}${price}${suffix}`;
 }
@@ -87,9 +98,10 @@ function renderMatrix(models, providerNames, styles, columns) {
   const modelFields = aliases.map((alias) => buildModelField(alias, models[alias], styles));
   const qualityFields = aliases.map((alias) => formatQuality(models[alias].quality));
   const ctxFields = aliases.map((alias) => formatContext(models[alias].context));
+  const footnotes = [];
   const providerFields = {};
   for (const name of providerNames) {
-    providerFields[name] = aliases.map((alias) => buildProviderCell(models[alias], name, styles));
+    providerFields[name] = aliases.map((alias) => buildProviderCell(models[alias], name, styles, footnotes));
   }
 
   const modelWidth = Math.max(visibleLength("MODEL"), ...modelFields.map(visibleLength));
@@ -140,6 +152,9 @@ function renderMatrix(models, providerNames, styles, columns) {
       styles.dim(`… ${droppedCount} more provider${droppedCount === 1 ? "" : "s"}: use a wider terminal or models --json`),
     );
   }
+  footnotes.forEach((note, index) => {
+    lines.push(styles.dim(`${FOOTNOTE_MARKS[index] || "*"} ${note}`));
+  });
 
   return lines.map((line) => clipVisible(line, columns));
 }
