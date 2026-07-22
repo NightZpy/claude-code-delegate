@@ -34,7 +34,7 @@ import {
   sendMessage,
   stopServer,
 } from "./lib/opencode.mjs";
-import { PROVIDERS, callProvider, fetchOpenRouterCredits } from "./lib/providers.mjs";
+import { PROVIDERS, callProvider, fetchOpenRouterCredits, fetchProviderBalance, fetchSiliconFlowBalance } from "./lib/providers.mjs";
 import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
@@ -1758,7 +1758,7 @@ async function listTouchedFiles(cwd) {
 // (today always openrouter); a failure is a failure, no silent reroute.
 async function executeAgenticTaskRequest(job, models, request, tools) {
   const selection = resolveModelSelection(models, request.model, request.provider);
-  const candidate = selection.providers[0];
+  let candidate = selection.providers[0];
   const agent = request.write ? "cc-build" : "cc-plan";
   // Snapshot the dirty tree BEFORE the run so salvage reports only what THIS run changed.
   const baselineDirty = new Set(await listTouchedFiles(job.cwd).catch(() => []));
@@ -1781,20 +1781,40 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
     throw new Error(contextGuard.failMessage);
   }
 
-  const providerConfig = PROVIDERS[candidate.name];
-  if (providerConfig?.envKey && !process.env[providerConfig.envKey]) {
+  // Providers with a key (a forced --provider already narrowed this to one).
+  // We fail over between them ONLY on pre-run REJECTIONS (credits/quota/limit —
+  // no spend). A timeout or ambiguous error stops immediately: the call may have
+  // run and billed, and blindly retrying elsewhere would double-spend.
+  const usable = selection.providers.filter((p) => {
+    const cfg = PROVIDERS[p.name];
+    return !cfg?.envKey || process.env[cfg.envKey];
+  });
+  if (!usable.length) {
     const setupScript = path.join(path.dirname(ENTRYPOINT), "setup-keys.mjs");
     throw new Error(
-      `no API key configured for provider ${candidate.name} of model ${selection.alias} (agentic mode uses the first provider only). ` +
-        `Configure keys: in Claude Code type \`! cc-delegate-keys\`, or run in your terminal:\n` +
-        `  node "${setupScript}"`,
+      `no API key configured for any provider of model ${selection.alias}. ` +
+        `Configure keys in a separate terminal: node "${setupScript}"`,
     );
   }
 
   const timeoutMs = request.callTimeoutMs || selection.timeoutMs || 900000;
 
-  // Serialize the whole agentic run: server + session + message share one
-  // opencode server, so a concurrent job would invalidate this one's session.
+  // Best-effort: skip providers already known to be out of balance (saves a
+  // doomed call). Unknown balance -> attempt anyway.
+  const keyValues = (await loadKeys()).values;
+  const balances = {};
+  for (const p of usable) {
+    balances[p.name] = await fetchProviderBalance(p.name, keyValues).catch(() => null);
+  }
+
+  const REJECTION = /requires more credits|insufficient|balance|quota|max_tokens|rate.?limit|\b40[23]\b|\b429\b/i;
+  const CONNECTION_RETRY = ["fetch failed", "econnreset", "socket hang up"];
+  function isConnErr(err) {
+    const m = String(err?.message || "").toLowerCase();
+    if (m.includes("exceeded") || m.includes("__cc_timeout__")) return false;
+    return CONNECTION_RETRY.some((h) => m.includes(h));
+  }
+
   const releaseSlot = await acquireAgenticSlot(CC_DELEGATE_HOME, {
     onWait: () => tools.log("waiting for the agentic slot (another agentic job is running)…"),
   });
@@ -1803,34 +1823,15 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
   let response;
   let server;
   let sessionId = request.opencodeSessionId || null;
-
-  // --- helper to decide when a retry is worthwhile ---
-  const SHOULD_RETRY_ERRORS = ["fetch failed", "econnreset", "socket hang up"];
-  const NO_RETRY_ERRORS = ["exceeded", "__cc_timeout__"];
-
-  function shouldRetry(err) {
-    const msg = String(err.message || "").toLowerCase();
-    if (NO_RETRY_ERRORS.some((hint) => msg.includes(hint))) {
-      return false;
-    }
-    return SHOULD_RETRY_ERRORS.some((hint) => msg.includes(hint));
-  }
-  // -------------------------------------------------
+  const rejections = [];
 
   try {
     try {
-      await tools.log(
-        `ensuring opencode server (agent=${agent}, model=${candidate.name}/${candidate.id})`,
-      );
       const wroteLeanAgents = await ensureLeanAgents();
       if (wroteLeanAgents) {
-        // New agent definitions only load at server start — restart if running.
-        try {
-          await stopServer(CC_DELEGATE_HOME);
-        } catch {}
+        try { await stopServer(CC_DELEGATE_HOME); } catch {}
       }
       server = await ensureServer(CC_DELEGATE_HOME);
-
       if (!sessionId) {
         const session = await createSession(server);
         sessionId = session.id;
@@ -1838,47 +1839,65 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
       }
       await tools.setJob({ opencodeSessionId: sessionId, mode: "agentic", agent });
 
-      const send = async () =>
-        sendMessage(server, sessionId, {
-          text: request.prompt,
-          agent,
-          model: { providerID: candidate.name, modelID: candidate.id },
-          timeoutMs,
-        });
-
-      const callStartedAt = Date.now();
-      try {
-        response = await send();
-      } catch (firstError) {
-        if (!shouldRetry(firstError)) {
-          throw firstError; // timeout/other → fail fast, no retry
+      for (let i = 0; i < usable.length; i += 1) {
+        const cand = usable[i];
+        const bal = balances[cand.name];
+        if (bal && bal.remaining !== undefined && bal.remaining !== null && bal.remaining <= 0) {
+          await tools.log(`skipping ${cand.name}: account balance exhausted ($${bal.remaining})`);
+          rejections.push(`${cand.name}: balance $${bal.remaining}`);
+          continue;
         }
-        await tools.log(
-          `agentic call failed (${firstError?.message || firstError}); retrying once on a fresh session`,
-        );
-        const session = await createSession(server);
-        sessionId = session.id;
-        await tools.setJob({ opencodeSessionId: sessionId });
+        await tools.log(`attempting ${selection.alias} via ${cand.name}/${cand.id} (agent=${agent})`);
+        const send = () =>
+          sendMessage(server, sessionId, {
+            text: request.prompt,
+            agent,
+            model: { providerID: cand.name, modelID: cand.id },
+            timeoutMs,
+          });
+        const callStartedAt = Date.now();
+        let resp;
         try {
-          response = await send();
-        } catch (secondError) {
+          resp = await send();
+        } catch (err) {
+          if (isConnErr(err)) {
+            await tools.log(`connection error on ${cand.name} (${err.message}); retrying once on a fresh session`);
+            const s = await createSession(server);
+            sessionId = s.id;
+            await tools.setJob({ opencodeSessionId: sessionId });
+            try {
+              resp = await send();
+            } catch (e2) {
+              throw new Error(
+                `agentic call failed for ${selection.alias} via ${cand.name} (session ${sessionId} on ${server.base}): ${e2.message}. ` +
+                  `Not failing over — the call may have run and billed.`,
+              );
+            }
+          } else {
+            throw err;
+          }
+        }
+        const ocError = resp?.info?.error;
+        if (ocError) {
+          const detail = ocError?.data?.message || ocError?.message || JSON.stringify(ocError);
+          if (REJECTION.test(detail) && i < usable.length - 1) {
+            await tools.log(`${cand.name} rejected: ${detail.slice(0, 90)} — failing over to next provider`);
+            rejections.push(`${cand.name}: ${detail.slice(0, 120)}`);
+            continue;
+          }
           throw new Error(
-            `agentic call failed for ${selection.alias} via ${candidate.name} ` +
-              `(session ${sessionId} on ${server.base}): ${secondError?.message || secondError}. ` +
-              `If ${candidate.name} is degraded, retry with --provider <name> (see \`cc-delegate models\`) or --model <alias>.`,
+            `agentic call rejected for ${selection.alias} via ${cand.name}: ${ocError.name || "error"} — ${detail}` +
+              (rejections.length ? ` (earlier: ${rejections.join("; ")})` : ""),
           );
         }
+        latencyMs = Date.now() - callStartedAt;
+        candidate = cand;
+        response = resp;
+        break;
       }
-      latencyMs = Date.now() - callStartedAt;
-      // OpenCode returns HTTP 200 with the provider's error tucked in
-      // info.error (e.g. OpenRouter "requires more credits, or fewer
-      // max_tokens" for pricier models on a low balance). Surface THAT instead
-      // of the generic empty-response message — it's the real, actionable cause.
-      const ocError = response?.info?.error;
-      if (ocError) {
-        const detail = ocError?.data?.message || ocError?.message || JSON.stringify(ocError);
+      if (!response) {
         throw new Error(
-          `agentic call rejected for ${selection.alias} via ${candidate.name}: ${ocError.name || "error"} — ${detail}`,
+          `agentic call failed for ${selection.alias}: no provider could serve it — ${rejections.join(" | ")}`,
         );
       }
     } catch (error) {
@@ -2082,6 +2101,10 @@ async function setupCommand(flags) {
   if (payload.providers.openrouter?.keyPresent) {
     openrouterCredits = await fetchOpenRouterCredits(keys.values.OPENROUTER_API_KEY);
   }
+  let siliconflowBalance = null;
+  if (payload.providers.siliconflow?.keyPresent) {
+    siliconflowBalance = await fetchSiliconFlowBalance(keys.values.SILICONFLOW_API_KEY);
+  }
   const activeProviders = new Set(getActiveProviders(models));
   for (const [provider, data] of Object.entries(payload.providers)) {
     data.active = activeProviders.has(provider);
@@ -2117,6 +2140,7 @@ async function setupCommand(flags) {
   if (flags.json) {
     payload.agentic = { installed: agenticInstalled, version: agenticVersion, serverRunning: agenticServerRunning };
     if (openrouterCredits) payload.openrouterCredits = openrouterCredits;
+    if (siliconflowBalance) payload.siliconflowBalance = siliconflowBalance;
     printJson(payload);
     return;
   }
@@ -2145,6 +2169,11 @@ async function setupCommand(flags) {
     const r = openrouterCredits.remaining;
     const flag = r <= 0 ? " 🔴 OUT — top up to run paid models" : r < 1 ? " ⚠ low" : "";
     lines.push(`openrouter account credits: $${r.toFixed(2)} remaining ($${openrouterCredits.usage.toFixed(2)} of $${openrouterCredits.credits.toFixed(2)} used)${flag}`);
+  }
+  if (siliconflowBalance) {
+    const b = siliconflowBalance.remaining;
+    const flag = b <= 0 ? " 🔴 OUT" : b < 1 ? " ⚠ low" : "";
+    lines.push(`siliconflow account balance: $${b.toFixed(2)}${flag}`);
   }
   lines.push(
     agenticServerRunning

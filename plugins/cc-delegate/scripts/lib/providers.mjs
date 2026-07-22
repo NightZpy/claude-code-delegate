@@ -190,3 +190,30 @@ export async function fetchOpenRouterCredits(apiKey) {
     return null;
   }
 }
+
+// SiliconFlow account balance via /v1/user/info (data.totalBalance).
+export async function fetchSiliconFlowBalance(apiKey) {
+  if (!apiKey) return null;
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch("https://api.siliconflow.com/v1/user/info", {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const d = (await res.json())?.data || {};
+    const remaining = Number(d.totalBalance);
+    return Number.isFinite(remaining) ? { remaining: Number(remaining.toFixed(4)) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Best-effort remaining balance for a provider, or null if unknown/unsupported.
+export async function fetchProviderBalance(providerName, keys) {
+  if (providerName === "openrouter") return fetchOpenRouterCredits(keys.OPENROUTER_API_KEY);
+  if (providerName === "siliconflow") return fetchSiliconFlowBalance(keys.SILICONFLOW_API_KEY);
+  return null; // deepinfra/cerebras: no known balance endpoint wired
+}

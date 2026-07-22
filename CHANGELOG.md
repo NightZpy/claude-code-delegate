@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-22
+
+### Added
+- **Agentic provider failover.** If a model's primary provider rejects a call for a *no-spend* reason (out of credits / quota / balance / max_tokens / 402·403·429), the run now fails over to the same model on the next provider in its chain, and only reports failure when every provider rejects (the error lists each). It deliberately does NOT fail over on timeouts or ambiguous errors — the call may have run and billed, so retrying elsewhere would double-spend.
+- Balance pre-check: providers already known to be out of balance are skipped before dispatch (saves a doomed call). `setup` now shows real OpenRouter credits AND SiliconFlow balance.
+
 ## [0.13.2] - 2026-07-22
 
 ### Added
