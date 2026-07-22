@@ -419,7 +419,9 @@ function buildOverviewView(filtered, filterInfo, styles, quotaSection) {
   );
   const totalCost = Number(displayUsage.totals.cost || 0);
   const modelRows = formatUsageRows(displayUsage.byModel, totalCost, styles);
-  const providerRows = formatUsageRows(displayUsage.byProvider, totalCost, styles);
+  const providerRows = formatUsageRows(displayUsage.byProvider, totalCost, styles, (name) =>
+    name === "unknown" ? "(failed — no provider)" : name,
+  );
   const sessionRows = formatUsageRows(displayUsage.bySession, totalCost, styles, (name) => {
     const sessionId = name === "null" ? null : name;
     const current = sessionId && sessionId === process.env.CC_DELEGATE_SESSION_ID ? " (current)" : "";
