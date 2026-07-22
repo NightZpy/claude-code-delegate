@@ -140,6 +140,10 @@ export async function callProvider(providerName, modelId, messages, opts = {}) {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        // OpenRouter attributes the call to this app in its "Top Apps" ranking;
+        // other providers ignore these two headers.
+        "HTTP-Referer": "https://github.com/NightZpy/claude-code-delegate",
+        "X-Title": "cc-delegate",
       },
       body: JSON.stringify({
         model: modelId,
