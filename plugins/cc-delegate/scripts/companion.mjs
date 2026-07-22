@@ -1066,31 +1066,53 @@ async function usageCommand(flags) {
       // ignore
     }
     if (!existing.length) {
-      process.stdout.write("no ledger to reset — nothing recorded yet.\n");
+      process.stdout.write("no usage history to reset — nothing recorded yet.\n");
       return;
     }
     const totalCost = existing.reduce((sum, r) => sum + Number(r.cost || 0), 0);
-    const summary = `This will archive ${existing.length} ledger rows (recorded total $${totalCost.toFixed(4)}) and start the usage dashboard fresh. The old data is kept as a .bak, never deleted.`;
-    // Confirm unless --yes was passed. In a TTY, ask; otherwise require --yes.
-    if (!flags.yes) {
-      if (procStdin.isTTY && procStdout.isTTY) {
-        process.stdout.write(`${summary}\n`);
-        const rl = readline.createInterface({ input: procStdin, output: procStdout });
-        const answer = (await rl.question("Type 'reset' to confirm: ")).trim();
-        rl.close();
-        if (answer !== "reset") {
-          process.stdout.write("cancelled — nothing changed.\n");
-          return;
-        }
-      } else {
-        process.stdout.write(`${summary}\nRe-run with --yes to confirm (non-interactive): cc-delegate usage --reset --yes\n`);
-        return;
+
+    const toCsv = () => {
+      const cols = ["ts", "provider", "model", "mode", "promptTokens", "completionTokens", "cost", "status", "latencyMs", "sessionId", "jobId"];
+      const esc = (v) => {
+        const s = v === undefined || v === null ? "" : String(v);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const lines = [cols.join(",")];
+      for (const r of existing) lines.push(cols.map((k) => esc(r[k])).join(","));
+      return lines.join("\n") + "\n";
+    };
+    const writeCsv = async () => {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const out = path.join(path.dirname(USAGE_LEDGER_FILE), `usage-export-${stamp}.csv`);
+      await fs.writeFile(out, toCsv(), "utf8");
+      return out;
+    };
+
+    // Interactive: ask whether to export first, then clear. Ctrl-C cancels.
+    if (procStdin.isTTY && procStdout.isTTY && !flags.yes) {
+      process.stdout.write(`Reset will clear all ${existing.length} usage rows (recorded total $${totalCost.toFixed(4)}).\n`);
+      const rl = readline.createInterface({ input: procStdin, output: procStdout });
+      const ans = (await rl.question("Export the current history to CSV first? [y/N]: ")).trim().toLowerCase();
+      rl.close();
+      if (ans === "y" || ans === "yes") {
+        const out = await writeCsv();
+        process.stdout.write(`exported to ${out}\n`);
       }
+      await fs.rm(USAGE_LEDGER_FILE, { force: true });
+      process.stdout.write("usage history cleared — the dashboard now starts fresh.\n");
+      return;
     }
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backup = `${USAGE_LEDGER_FILE}.${stamp}.bak`;
-    await fs.rename(USAGE_LEDGER_FILE, backup);
-    process.stdout.write(`ledger archived to ${backup}\nusage now tracks fresh, accurate data going forward.\n`);
+    // Non-interactive: require --yes; --export writes the CSV first.
+    if (!flags.yes) {
+      process.stdout.write(`Reset will clear all ${existing.length} usage rows ($${totalCost.toFixed(4)}). Re-run with --yes (add --export to save a CSV first): cc-delegate usage --reset --yes [--export]\n`);
+      return;
+    }
+    if (flags.export) {
+      const out = await writeCsv();
+      process.stdout.write(`exported to ${out}\n`);
+    }
+    await fs.rm(USAGE_LEDGER_FILE, { force: true });
+    process.stdout.write("usage history cleared — the dashboard now starts fresh.\n");
     return;
   }
   if (flags.details) {

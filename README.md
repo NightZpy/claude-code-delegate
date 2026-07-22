@@ -178,12 +178,15 @@ When `enforce` is active, the Stop hook halts the turn until a passing review is
 
 ## Monitoring
 
-- **TUI:** `cc-delegate usage` (without flags) opens an interactive tabbed viewer — Overview / Details / Health / Quotas / Analyze. `←`/`→` or `1`‑`5` switch tabs, `m` filters by mode (text / agentic), `r` reloads, `q`/Esc exits.
+- **TUI:** `cc-delegate usage` (without flags) opens an interactive tabbed viewer — Overview / Details / Health / Quotas / Analyze. `←`/`→` or `1`‑`5` switch tabs, `g` cycles the mode scope (all / text / agentic) across every tab, `r` reloads, `q`/Esc exits.
 - **Ledger:** Every provider response appends a JSONL record to `~/.claude/cc-delegate/usage.jsonl` — job id, model, provider, tokens, cost, latency, context‑window usage, and mode.
+- **How cost is measured (accurate):** text‑mode calls use the provider's actual billed cost when it reports one (OpenRouter returns it), otherwise a registry estimate; cached input tokens are priced at their cheaper rate. Agentic runs sum the cost of **every** tool‑loop turn in the session (not just the final message), and a run that billed tokens before failing still records its real cost. Provider account balances are shown in `cc-delegate setup` (real OpenRouter credits + SiliconFlow balance) — the true gate for paid calls.
+- **Reset the dashboard:** `cc-delegate usage --reset` clears all history and starts fresh. In a terminal it first asks whether to export the current history to CSV (`~/.claude/cc-delegate/usage-export-<time>.csv`); non‑interactively use `--reset --yes` (add `--export` to save the CSV first).
 - **Quotas:** `cc-delegate-keys` sets optional monthly USD caps per provider. Crossing 80% shows `⚠`, 100% `🔴`. Informational only — delegations are never blocked.
-- **Circuit‑breaker:** After each task the runtime checks (model, provider) health over the last 20 entries. A degraded pair prepends a `⚡ circuit‑breaker advisory` with ranked fallback suggestions.
+- **Circuit‑breaker:** After each task the runtime checks (model, provider) health over the last 20 entries. A degraded pair prepends a `⚡ circuit‑breaker advisory` ending with the exact retry flags (`→ retry: --model X --provider Y`).
 - **Context guard:** Fails fast if the prompt clearly exceeds the model’s context window; warns at ≥70% usage with `⚠ context`.
-- **Spend split:** The TUI’s Overview and `cc-delegate usage --details --json` report text‑vs‑agentic cost separately.
+- **Live agentic progress:** `cc-delegate watch <job-id>` tails a running agentic job's tool activity (files read, commands run, edits).
+- **Spend split:** The TUI’s Overview and `cc-delegate usage --details --json` report text‑vs‑agentic cost separately (`usage --details --mode agentic` shows the agentic table with agent, reasoning, cache and tool‑call columns).
 
 ## Codex equivalence
 

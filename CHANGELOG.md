@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.15.3] - 2026-07-22
 
 ### Changed
-- `usage --reset` now requires confirmation: in a terminal it shows a summary (rows + recorded total) and asks you to type `reset`; non-interactively it requires `--reset --yes`. The old ledger is archived to a timestamped `.bak`, never deleted.
+- `usage --reset` clears all history and starts fresh. In a terminal it asks whether to export the current history to CSV first (`usage-export-<time>.csv`); non-interactively use `--reset --yes` (add `--export` to save the CSV).
 ## [0.15.2] - 2026-07-22
 
 ### Added
