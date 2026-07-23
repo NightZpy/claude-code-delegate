@@ -157,6 +157,7 @@ cc-delegate opencode stop
 | `/cc-delegate:glm` | Delegate to GLM — multi‑step agentic refactors |
 | `/cc-delegate:grok` | Delegate to Grok — frontier generalist reasoning and coding second opinions |
 | `/cc-delegate:status` | Show active / recent delegation jobs for this repository |
+| `/cc-delegate:jobs` | Snapshot of every job plus what each running one is doing right now |
 | `/cc-delegate:result` | Show the stored final output for a finished job |
 | `/cc-delegate:cancel` | Cancel an active background delegation job |
 | `/cc-delegate:usage` | Show token and cost usage of delegations (interactive TUI when piped) |
@@ -182,6 +183,7 @@ cc-delegate opencode stop
 | `analysis` | Show or save an analysis |
 | `gate` | Set review‑gate policy (`off`, `warn`, `enforce`) |
 | `opencode` | Manage the agentic OpenCode backend (`status`, `stop`) |
+| `jobs` | Interactive panel: browse jobs, ↑/↓ select, enter to open one and watch it live (`--static` for a snapshot) |
 | `slot` | Inspect the agentic run slot; `--release` clears a wedged/stale lock (`--force` if the holder is still alive) |
 | `reconcile` | Cross-check ledger spend vs OpenRouter's own usage (`--set-baseline` for delta tracking); lists `unconfirmed` failed-but-maybe-billed rows |
 | `link` | Install the global `cc-delegate` / `cc-delegate-keys` wrappers |
