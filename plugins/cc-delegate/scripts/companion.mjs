@@ -611,7 +611,7 @@ function buildHealthView(normalized, modelStats, providerStats, warnings, styles
 
 // Builds the human-readable Quotas body (no trailing newline). Used by the
 // TUI's Quotas tab; the static `usage` overview embeds the same section.
-async function buildQuotasView(config, entries, styles) {
+function buildQuotasView(config, entries, styles) {
   const quotaSection = buildQuotaSection(config, entries, styles);
   if (!quotaSection) {
     return [
