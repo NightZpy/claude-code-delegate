@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-07-23
+
+### Fixed
+- **Stale agentic lock deadlock.** A crashed agentic job (OOM, provider 402, killed process) left its run-lock behind, and the only cleanup was a 46-minute mtime timeout — so every subsequent agentic job blocked for up to 46 minutes on a phantom holder. The slot is now reclaimed by **liveness** (`process.kill(pid, 0)`): a dead holder's lock is stolen in milliseconds. The lock is also released on abnormal exit (SIGTERM/SIGINT/uncaughtException/exit), not only in the normal `finally`.
+
+### Added
+- The lock now stores `{pid, startedAt, jobId}`; `cc-delegate status` shows the agentic slot holder (and flags a STALE dead holder), and the "waiting for the agentic slot" message names the holder.
+- `cc-delegate slot` — inspect the agentic run slot; `slot --release` clears a wedged lock (`--force` to release even a live holder).
+
 ## [0.16.1] - 2026-07-23
 
 ### Added

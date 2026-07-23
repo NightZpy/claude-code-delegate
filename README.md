@@ -182,6 +182,7 @@ cc-delegate opencode stop
 | `analysis` | Show or save an analysis |
 | `gate` | Set review‑gate policy (`off`, `warn`, `enforce`) |
 | `opencode` | Manage the agentic OpenCode backend (`status`, `stop`) |
+| `slot` | Inspect the agentic run slot; `--release` clears a wedged/stale lock (`--force` if the holder is still alive) |
 | `link` | Install the global `cc-delegate` / `cc-delegate-keys` wrappers |
 | `uninstall` | Stop the OpenCode server and remove wrappers (`--purge` also deletes data) |
 

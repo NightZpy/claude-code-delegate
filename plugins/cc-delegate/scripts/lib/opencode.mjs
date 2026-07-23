@@ -3,6 +3,7 @@ import { spawn, execFile } from "node:child_process";
 import crypto from "node:crypto";
 import os from "node:os";
 import fs from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { loadKeys } from "./env.mjs";
@@ -176,13 +177,61 @@ async function acquireEnsureLock(stateDir) {
   throw new Error("timed out waiting for the opencode ensure lock");
 }
 
+// Is a pid actually alive? kill(pid,0) throws ESRCH if the process is gone,
+// EPERM if it exists but we can't signal it (still alive). Anything else / bad
+// pid → treat as not-alive so a garbage lock can be reclaimed.
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+// Read the agentic-slot lock. New format is JSON {pid, startedAt, jobId};
+// tolerate the old bare-pid string. Returns null if absent/unreadable.
+export async function readAgenticSlotHolder(stateDir) {
+  const lockFile = path.join(stateDir, "agentic-run.lock");
+  try {
+    const raw = (await fs.readFile(lockFile, "utf8")).trim();
+    if (!raw) return null;
+    const holder = raw[0] === "{" ? JSON.parse(raw) : { pid: Number(raw) || null };
+    return { ...holder, alive: pidAlive(holder.pid) };
+  } catch {
+    return null;
+  }
+}
+
+// Free the agentic slot even on abnormal exit (OOM kill, SIGTERM, provider
+// error that crashes the worker) — the normal releaseSlot() in `finally` is not
+// enough, and a leaked lock used to deadlock every future agentic job. We track
+// the lock files this process holds and remove them synchronously on exit/signal.
+const _heldSlotLocks = new Set();
+let _slotExitHandlersInstalled = false;
+function installSlotExitHandlers() {
+  if (_slotExitHandlersInstalled) return;
+  _slotExitHandlersInstalled = true;
+  const sweep = () => {
+    for (const f of _heldSlotLocks) {
+      try { unlinkSync(f); } catch {}
+    }
+  };
+  process.on("exit", sweep);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.on(sig, () => { sweep(); process.exit(1); });
+  }
+  process.on("uncaughtException", (err) => { sweep(); throw err; });
+}
+
 // A run-level lock held for a WHOLE agentic execution (server + session +
 // message), not just the ensure phase. Two concurrent agentic jobs share one
 // opencode server on a fixed port; without this the second job's ensure/session
 // tears down the first's in-flight session and its next fetch fails. Serializes
 // agentic runs instead. ponytail: one shared server, serialized — per-job ports
 // would allow true parallelism if it ever matters.
-export async function acquireAgenticSlot(stateDir, { onWait } = {}) {
+export async function acquireAgenticSlot(stateDir, { onWait, jobId } = {}) {
   await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
   const lockFile = path.join(stateDir, "agentic-run.lock");
   const deadline = Date.now() + 45 * 60 * 1000; // long enough for a slow kimi run
@@ -190,18 +239,38 @@ export async function acquireAgenticSlot(stateDir, { onWait } = {}) {
   while (Date.now() < deadline) {
     try {
       const fh = await fs.open(lockFile, "wx");
-      await fh.write(String(process.pid));
+      await fh.write(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), jobId: jobId || null }));
       await fh.close();
-      return async () => { await fs.rm(lockFile, { force: true }); };
-    } catch {
-      try {
-        const st = await fs.stat(lockFile);
-        if (Date.now() - st.mtimeMs > 46 * 60 * 1000) {
-          await fs.rm(lockFile, { force: true }); // stale holder (crashed job)
-          continue;
-        }
-      } catch {}
-      if (!warned && onWait) { warned = true; await onWait(); }
+      _heldSlotLocks.add(lockFile);
+      installSlotExitHandlers();
+      return async () => {
+        _heldSlotLocks.delete(lockFile);
+        await fs.rm(lockFile, { force: true });
+      };
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err; // a real fs error, not "lock held"
+      // Reclaim on LIVENESS, not wall-clock: a crashed holder (OOM, 402, kill)
+      // leaves its pid but the process is dead — steal the slot immediately
+      // instead of blocking every future agentic job for ~46 minutes.
+      const holder = await readAgenticSlotHolder(stateDir);
+      if (holder && Number.isInteger(holder.pid) && !holder.alive) {
+        await fs.rm(lockFile, { force: true });
+        continue; // retry now
+      }
+      // Fallback for a garbage/pid-less lock: reclaim if it's been sitting >2 min.
+      if (!holder || !Number.isInteger(holder.pid)) {
+        try {
+          const st = await fs.stat(lockFile);
+          if (Date.now() - st.mtimeMs > 2 * 60 * 1000) {
+            await fs.rm(lockFile, { force: true });
+            continue;
+          }
+        } catch {}
+      }
+      if (!warned && onWait) {
+        warned = true;
+        await onWait(holder || null);
+      }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
   }
