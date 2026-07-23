@@ -22,7 +22,7 @@ import {
 import { loadConfig, saveConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker, appendUsageLedger } from "./lib/jobs.mjs";
 import { runAgenticWorkersParallel } from "./lib/agentic-parallel.mjs";
-import { runJobsTui, renderJobList, renderJobDetail } from "./lib/jobs-tui.mjs";
+import { runJobsTui, renderJobList, renderJobDetail, sortJobsByStatus, filterJobsByStatus } from "./lib/jobs-tui.mjs";
 import { diffOfFiles, reconcileClaims } from "./lib/write-verify.mjs";
 import {
   checkServerHealth,
@@ -3892,7 +3892,7 @@ async function jobsCommand(cwd, flags) {
   const fetchList = async () => {
     const summaries = (await listJobs(cwd)).slice(0, 30);
     const full = await Promise.all(summaries.map((s) => loadJob(cwd, s.id).catch(() => null)));
-    return summaries.map((s, i) => {
+    const rows = summaries.map((s, i) => {
       const f = full[i];
       return {
         id: s.id,
@@ -3903,6 +3903,8 @@ async function jobsCommand(cwd, flags) {
         preview: s.promptPreview || "",
       };
     });
+    // Surface running/queued jobs first (stable — preserves recency within each group).
+    return sortJobsByStatus(rows);
   };
 
   const fetchDetail = async (id) => {

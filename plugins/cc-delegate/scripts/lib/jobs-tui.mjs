@@ -12,6 +12,29 @@ function formatElapsed(ms) {
   return `${m}m${s}s`;
 }
 
+// Stable sort: running first, then queued, then everything else.
+// Within each group the input (recency) order is preserved — Array.prototype.sort
+// is stable in modern Node, so returning 0 keeps original positions.
+export function sortJobsByStatus(jobs) {
+  const rank = (j) => {
+    if (j.status === 'running') return 0;
+    if (j.status === 'queued') return 1;
+    return 2;
+  };
+  return jobs.slice().sort((a, b) => rank(a) - rank(b));
+}
+
+// VIEW-only filter for the list panel. 'running' includes queued (treated as running).
+export function filterJobsByStatus(jobs, filter) {
+  if (!filter || filter === 'all') return jobs.slice();
+  return jobs.filter((j) => {
+    if (filter === 'running') return j.status === 'running' || j.status === 'queued';
+    if (filter === 'completed') return j.status === 'completed';
+    if (filter === 'failed') return j.status === 'failed';
+    return true;
+  });
+}
+
 // ---------- exported renderers ----------
 
 /**
@@ -21,9 +44,18 @@ function formatElapsed(ms) {
  * @param {number} cols terminal width
  * @returns {string}
  */
-export function renderJobList(jobs, selected, styles, cols) {
+export function renderJobList(jobs, selected, styles, cols, filter) {
   const lines = [];
-  lines.push(styles.dim('JOBS  (↑/↓ select · enter open · r reload · q quit)'));
+  // Title/hint bar first, then the column header, then rows. The header is not
+  // selectable (selection indexes the jobs array, not the rendered lines).
+  const hint = filter
+    ? `JOBS  (↑/↓ select · enter open · r reload · f filter: ${filter} · q quit)`
+    : 'JOBS  (↑/↓ select · enter open · r reload · q quit)';
+  lines.push(styles.dim(hint));
+  const header = styles.dim(
+    `  ${'STATUS'.padEnd(10)} ${'ID'.padEnd(22)} ${'MODEL'.padEnd(14)} ${'MODE'.padEnd(8)} ELAPSED TASK`,
+  );
+  lines.push(header);
   if (!jobs.length) {
     lines.push(styles.dim('no jobs yet'));
     return lines.join('\n');
@@ -52,10 +84,10 @@ export function renderJobList(jobs, selected, styles, cols) {
         statusStr = paddedStatus;
     }
 
-    const rawId = (job.id || '').slice(0, 22);
+    const rawId = (job.id || '').slice(0, 22).padEnd(22);
     const rawModel = (job.model || '').padEnd(14).slice(0, 14);
     const rawMode = (job.mode || '').padEnd(8).slice(0, 8);
-    const elapsedStr = formatElapsed(job.elapsedMs || 0);
+    const elapsedStr = formatElapsed(job.elapsedMs || 0).padEnd(7);
     let previewRaw = (job.preview || '').replace(/\n/g, ' ');
 
     // calculate visible width of the fixed parts (without any escape codes)
@@ -166,6 +198,8 @@ export async function runJobsTui(deps) {
   let selected = 0;
   let currentJobId = null;
   let jobs = [];
+  let filter = 'all'; // cycles: all → running → completed → failed → all
+  const FILTER_CYCLE = ['all', 'running', 'completed', 'failed'];
   let detailData = null; // { job, activity, logTail }
   let cols = stdout.columns || 100;
   let rawModeEnabled = false;
@@ -184,11 +218,13 @@ export async function runJobsTui(deps) {
     stdin.pause();
   };
 
+  const getViewJobs = () => filterJobsByStatus(jobs, filter);
+
   const render = () => {
     cols = stdout.columns || 100;
     let view;
     if (mode === 'list') {
-      view = renderJobList(jobs, selected, styles, cols);
+      view = renderJobList(getViewJobs(), selected, styles, cols, filter);
     } else {
       view = detailData
         ? renderJobDetail(detailData.job, detailData.activity, detailData.logTail, styles, cols)
@@ -203,7 +239,8 @@ export async function runJobsTui(deps) {
     try {
       if (mode === 'list') {
         jobs = await listJobs();
-        if (selected >= jobs.length) selected = Math.max(0, jobs.length - 1);
+        const viewJobs = getViewJobs();
+        if (selected >= viewJobs.length) selected = Math.max(0, viewJobs.length - 1);
       } else {
         if (currentJobId) {
           detailData = await getDetail(currentJobId);
@@ -231,14 +268,24 @@ export async function runJobsTui(deps) {
 
     if (mode === 'list') {
       if (key === '\x1b[A') {
+        const viewJobs = getViewJobs();
         selected = Math.max(0, selected - 1);
+        if (selected >= viewJobs.length) selected = Math.max(0, viewJobs.length - 1);
         render();
       } else if (key === '\x1b[B') {
-        selected = Math.min(jobs.length - 1, selected + 1);
+        const viewJobs = getViewJobs();
+        selected = Math.max(0, Math.min(viewJobs.length - 1, selected + 1));
+        render();
+      } else if (key === 'f') {
+        const idx = FILTER_CYCLE.indexOf(filter);
+        filter = FILTER_CYCLE[(idx + 1) % FILTER_CYCLE.length];
+        const viewJobs = getViewJobs();
+        selected = viewJobs.length > 0 ? Math.max(0, Math.min(selected, viewJobs.length - 1)) : 0;
         render();
       } else if (key === '\r' || key === '\n') {
-        if (jobs.length > 0 && selected >= 0 && selected < jobs.length) {
-          currentJobId = jobs[selected].id;
+        const viewJobs = getViewJobs();
+        if (viewJobs.length > 0 && selected >= 0 && selected < viewJobs.length) {
+          currentJobId = viewJobs[selected].id;
           mode = 'detail';
           refresh();
         }
@@ -304,18 +351,20 @@ if (import.meta.url === `file://${process.argv[1]}` && process.argv.includes('--
     const out1 = renderJobList([], 0, S, 80);
     assert.ok(out1.includes('no jobs yet'), 'Test 1: empty list message');
 
-    // 2. two jobs, second selected
+    // 2. two jobs, second selected (line 0 = hint/title, line 1 = header, line 2+ = jobs)
     const jobs2 = [
       { id: 'job-1', status: 'running', model: 'gpt-4', mode: 'agentic', elapsedMs: 500, preview: 'doing work' },
       { id: 'job-2-long-id-123456789012345', status: 'completed', model: 'claude-3', mode: 'react', elapsedMs: 125000, preview: 'finished' }
     ];
     const out2 = renderJobList(jobs2, 1, S, 80);
     const lines2 = out2.split('\n');
-    assert.ok(lines2[1].startsWith('  '), 'Job 0 row starts with two spaces');
-    assert.ok(lines2[2].startsWith('> '), 'Job 1 row starts with > ');
-    assert.ok(lines2[1].includes('job-1'), 'Job 0 row contains job-1');
+    assert.ok(lines2[0].includes('JOBS'), 'Title bar first');
+    assert.ok(lines2[1].includes('STATUS') && lines2[1].includes('MODEL') && lines2[1].includes('TASK'), 'Header row second');
+    assert.ok(lines2[2].startsWith('  '), 'Job 0 row starts with two spaces');
+    assert.ok(lines2[3].startsWith('> '), 'Job 1 row starts with > ');
+    assert.ok(lines2[2].includes('job-1'), 'Job 0 row contains job-1');
     // ids are truncated to 22 chars, so the row carries the truncated prefix
-    assert.ok(lines2[2].includes('job-2-long-id-123456789012345'.slice(0, 22)), 'Job 1 row contains truncated id');
+    assert.ok(lines2[3].includes('job-2-long-id-123456789012345'.slice(0, 22)), 'Job 1 row contains truncated id');
 
     // 3. long preview – all lines <= cols
     const longPreview = 'x'.repeat(500);
