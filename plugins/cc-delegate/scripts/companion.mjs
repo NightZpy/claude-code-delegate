@@ -38,6 +38,8 @@ import {
   stopServer,
 } from "./lib/opencode.mjs";
 import { PROVIDERS, callProvider, fetchOpenRouterCredits, fetchProviderBalance, fetchSiliconFlowBalance } from "./lib/providers.mjs";
+import { createIsolatedWorktree, captureJobPatch, mergePatchBack } from "./lib/worktree.mjs";
+import { runOrchestration } from "./lib/orchestrate.mjs";
 import { getActiveProviders, renderProviderGuide } from "./lib/providerGuide.mjs";
 import { buildQuotaSection, computeQuotaStatus, currentMonthKey, formatQuotaAlertLine, formatUsd2 } from "./lib/quota.mjs";
 import { terminalStyles, sectionTitle } from "./lib/styles.mjs";
@@ -496,12 +498,25 @@ function buildOverviewView(filtered, filterInfo, styles, quotaSection) {
 }
 
 // Builds the human-readable Details body (no trailing newline).
-function buildDetailsView(limited, styles) {
-  if (!limited.length) {
+function buildDetailsView(limited, styles, runningJobs = []) {
+  if (!limited.length && !(runningJobs && runningJobs.length)) {
     return "no usage recorded yet";
   }
 
   const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "CTX%", "STATUS", "MODE"];
+  // Running jobs first (STATUS col is index 9; MODE is last). Build explicitly
+  // so the STATUS/MODE placement matches this view's columns.
+  const runningRows = (runningJobs || []).map((j) => {
+    const cells = ["-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"];
+    cells[0] = formatRelativeTime(j.startedAt);
+    cells[1] = formatJobIdShort(j.jobId);
+    cells[2] = String(j.model || "-");
+    cells[3] = String(j.provider || "-");
+    cells[7] = "running";
+    cells[9] = j.status || "running";
+    cells[10] = j.mode || "text";
+    return { cells, running: true, ctxPct: null, failed: false };
+  });
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
     const failed = entry.status !== "completed";
@@ -525,7 +540,13 @@ function buildDetailsView(limited, styles) {
   });
 
   const ctxIndex = headers.indexOf("CTX%");
-  return renderTable(headers, rows, styles, (cells, row) => {
+  const statusIndex = headers.indexOf("STATUS");
+  return renderTable(headers, [...runningRows, ...rows], styles, (cells, row) => {
+    if (row.running) {
+      const c = [...cells];
+      c[statusIndex] = styles.bold(cells[statusIndex]);
+      return c;
+    }
     if (row.failed) {
       const dimmed = cells.map((cell) => styles.dim(cell));
       dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
@@ -590,7 +611,7 @@ function buildHealthView(normalized, modelStats, providerStats, warnings, styles
 
 // Builds the human-readable Quotas body (no trailing newline). Used by the
 // TUI's Quotas tab; the static `usage` overview embeds the same section.
-async function buildQuotasView(config, entries, styles) {
+function buildQuotasView(config, entries, styles) {
   const quotaSection = buildQuotaSection(config, entries, styles);
   if (!quotaSection) {
     return [
@@ -718,8 +739,13 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
 
 
 // buildUsageTabBody
-function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all') {
-  if (modeScope !== "all" && entries.length === 0) {
+function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all', runningJobs = []) {
+  // Filter running jobs to the active scope BEFORE the empty-state guard, else
+  // an agentic job running under a `text` scope suppresses "no text delegations yet".
+  const scopedRunning = modeScope === "all"
+    ? (runningJobs || [])
+    : (runningJobs || []).filter((j) => (j.mode || "text") === modeScope);
+  if (modeScope !== "all" && entries.length === 0 && scopedRunning.length === 0) {
     return `  ${styles.dim(`no ${modeScope} delegations yet`)}`;
   }
   if (tabIndex === 3) {
@@ -747,9 +773,9 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
     const sorted = [...entries].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
     const limited = sorted.slice(0, Math.max(0, limit));
     if (modeScope === "agentic") {
-      return buildAgenticDetailsView(limited, styles);
+      return buildAgenticDetailsView(limited, styles, scopedRunning);
     }
-    return buildDetailsView(limited, styles);
+    return buildDetailsView(limited, styles, scopedRunning);
   }
 
   const normalized = entries.map(normalizeLedgerEntry);
@@ -849,6 +875,31 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
 // Interactive tabbed usage viewer. Entered only when stdout/stdin are both
 // TTYs and no view flag (--details/--health/--json) or --static was passed.
 // ponytail: no scroll — content taller than the terminal is truncated with a
+// In-flight jobs for the current workspace — they live in job state, never in
+// the ledger (which only records finished jobs), so the Details tab must fetch
+// them separately or running work is invisible.
+async function loadRunningJobsForTui() {
+  try {
+    const cwd = process.cwd();
+    const summaries = (await listJobs(cwd)).filter(
+      (j) => j.status === "running" || j.status === "queued",
+    );
+    // Summaries drop `mode`/`request`; load the full job (few of them) so the
+    // mode column and text/agentic scope filter are correct.
+    const full = await Promise.all(summaries.map((s) => loadJob(cwd, s.id).catch(() => null)));
+    return full.filter(Boolean).map((j) => ({
+      jobId: j.id,
+      model: j.model,
+      provider: j.provider,
+      mode: j.mode || (j.request?.agentic ? "agentic" : "text"),
+      status: j.status,
+      startedAt: j.createdAt,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 // hint to use the static --details/--limit view instead of building a pager.
 // runUsageTui
 async function runUsageTui(flags) {
@@ -858,6 +909,7 @@ async function runUsageTui(flags) {
   const models = await readModelsRegistry();
   let entries = await readUsageLedger();
   let savedAnalysis = await readSavedAnalysis();
+  let runningJobs = await loadRunningJobsForTui();
   let activeTab = 0;
   let modeScope = "all"; // all | text | agentic
   const wasRaw = Boolean(stdin.isRaw);
@@ -884,7 +936,8 @@ async function runUsageTui(flags) {
       styles,
       models,
       savedAnalysis,
-      modeScope
+      modeScope,
+      runningJobs
     );
     const helpLine = styles.dim(
       "←/→ or 1-5 switch view · r reload · g mode (all→text→agentic) · q quit"
@@ -989,6 +1042,7 @@ async function runUsageTui(flags) {
         acted = true;
       } else if (ch === "r") {
         entries = await readUsageLedger();
+        runningJobs = await loadRunningJobsForTui();
         savedAnalysis = await readSavedAnalysis();
         acted = true;
       } else if (ch === "g") {
@@ -1177,12 +1231,21 @@ async function usageCommand(flags) {
   writeClippedToStdout(view);
 }
 
-function buildAgenticDetailsView(limited, styles) {
-  if (!limited.length) {
+function buildAgenticDetailsView(limited, styles, runningJobs = []) {
+  if (!limited.length && !(runningJobs && runningJobs.length)) {
     return "no agentic usage recorded yet";
   }
 
   const headers = ["TIME", "JOB", "MODEL", "AGENT", "IN", "REASON", "OUT", "CACHE-R", "TOOLS", "FILES", "COST", "LATENCY", "STATUS"];
+  const runningRows = (runningJobs || []).map((j) => {
+    const cells = new Array(headers.length).fill("-");
+    cells[0] = formatRelativeTime(j.startedAt);
+    cells[1] = formatJobIdShort(j.jobId);
+    cells[2] = String(j.model || "-");
+    cells[headers.length - 2] = "running";      // LATENCY
+    cells[headers.length - 1] = j.status || "running"; // STATUS
+    return { cells, running: true, ctxPct: null, failed: false };
+  });
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
     const failed = entry.status !== "completed";
@@ -1214,8 +1277,12 @@ function buildAgenticDetailsView(limited, styles) {
     return row;
   });
 
-  const ctxIndex = headers.indexOf("CTX%"); // unused here but kept for compatibility; we ignore context% in this view.
-  return renderTable(headers, rows, styles, (cells, row) => {
+  return renderTable(headers, [...runningRows, ...rows], styles, (cells, row) => {
+    if (row.running) {
+      const c = [...cells];
+      c[c.length - 1] = styles.bold(cells[cells.length - 1]);
+      return c;
+    }
     if (row.failed) {
       const dimmed = cells.map((cell) => styles.dim(cell));
       dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
@@ -2104,6 +2171,76 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
 
 
 
+// --isolate wrapper: run an agentic --write job inside a throwaway git worktree
+// branched from repoDir's HEAD (carrying tracked working changes), so the job's
+// edits can't corrupt the shared tree. Afterward we capture ONLY this job's own
+// patch and merge it back, reporting a merge conflict loudly instead of clobbering.
+// Touches executeAgenticTaskRequest ZERO — it just runs with job.cwd = the worktree.
+async function runIsolatedAgentic(repoDir, job, models, request, tools) {
+  let wt;
+  try {
+    wt = await createIsolatedWorktree(repoDir);
+  } catch (err) {
+    throw new Error(`--isolate requires a git repository at ${repoDir}: ${err.message}`);
+  }
+  const originalCwd = process.cwd();
+  const jobInWt = { ...job, cwd: wt.dir };
+  try {
+    // chdir + first log inside the try so an early throw still hits the finally
+    // (restore cwd + tear down the worktree) instead of stranding process.cwd().
+    process.chdir(wt.dir);
+    await tools.log(`isolated worktree ${wt.dir} (base ${wt.base.slice(0, 8)})`);
+    const result = await executeAgenticTaskRequest(jobInWt, models, request, tools);
+    const patch = await captureJobPatch(wt);
+    if (!patch.trim()) {
+      await tools.log("isolated run produced no file changes — nothing to merge");
+      return result;
+    }
+    // deferMerge: the orchestrator merges after review — the worker only captures.
+    if (request.deferMerge) {
+      await tools.setJob({ jobPatch: patch });
+      if (result.result) result.result.jobPatch = patch;
+      await tools.log(`isolated patch captured (${(result.result?.touchedFiles || []).length} file(s)); merge deferred to orchestrator`);
+      return result;
+    }
+    const merge = await mergePatchBack(repoDir, patch);
+    const files = result.result?.touchedFiles || [];
+    await tools.setJob({ jobPatch: patch, merged: merge.applied });
+    let note;
+    if (merge.applied) {
+      note = `merged ${files.length} file(s) back to the working tree: ${files.join(", ") || "(see patch)"}`;
+      await tools.log(note);
+    } else {
+      await tools.setJob({ mergeConflicts: merge.conflicts || [] });
+      note = `⚠ merge conflict — patch NOT applied to the working tree. Conflicting: ${(merge.conflicts || []).join(", ")}. The job's own patch is saved on the job (jobPatch) for manual apply.`;
+      await tools.log(note);
+    }
+    if (result.result) {
+      result.result.content = `${result.result.content || ""}\n\n[isolate] ${note}`;
+      result.result.merged = merge.applied;
+      result.result.jobPatch = patch;
+    }
+    return result;
+  } catch (err) {
+    // Salvage the job's own patch for inspection before the worktree is torn down.
+    try {
+      const patch = await captureJobPatch(wt);
+      if (patch.trim()) {
+        await tools.setJob({ jobPatch: patch });
+        await tools.log(`isolated run failed; its patch was saved on the job (jobPatch) before teardown`);
+      }
+    } catch {
+      // best-effort
+    }
+    throw err;
+  } finally {
+    if (process.cwd() !== originalCwd) {
+      try { process.chdir(originalCwd); } catch {}
+    }
+    await wt.cleanup();
+  }
+}
+
 function summarizeJobForOutput(job, progressPreview) {
   const startedAt = job.createdAt;
   const endedAt = job.completedAt || job.cancelledAt || job.updatedAt;
@@ -2373,6 +2510,7 @@ async function createTaskJob(cwd, flags, positionals) {
     conversationSeed,
     agentic: Boolean(flags.agentic),
     write: Boolean(flags.write),
+    isolate: Boolean(flags.isolate),
     opencodeSessionId,
     callTimeoutMs: flags["call-timeout"] !== undefined
       ? Number(flags["call-timeout"]) * 1000
@@ -2476,6 +2614,9 @@ async function runTask(cwd, job) {
   const models = await readModelsRegistry();
   const completed = await runTrackedJob(cwd, job.id, async (tools) => {
     if (job.request?.agentic) {
+      if (job.request.isolate && job.request.write) {
+        return runIsolatedAgentic(cwd, job, models, job.request, tools);
+      }
       return executeAgenticTaskRequest(job, models, job.request, tools);
     }
     return executeTaskRequest(job, models, job.request, tools);
@@ -2493,6 +2634,8 @@ Flags:
   --provider <name>     force a provider: openrouter|siliconflow (else the model's chain)
   --agentic             run on a local OpenCode server with real tools (read/run/edit)
   --write               (agentic) allow file edits; default is read-only
+  --isolate             (agentic --write) run in a throwaway git worktree, then
+                        merge only this job's own patch back (conflict = not applied)
   --file <path>         attach a file as context (repeatable)
   --diff                attach \`git diff HEAD\` as context
   --resume <jobId|last> continue a previous job's thread
@@ -3092,12 +3235,189 @@ async function printFinalActivity(job) {
   } catch {}
 }
 
+// Best-effort extract a JSON value from a model reply that may wrap it in prose
+// or ```json fences. Returns the parsed value or null.
+function parseJsonLoose(text) {
+  if (!text) return null;
+  let s = String(text).replace(/```(?:json)?/gi, "").trim();
+  const firstArr = s.indexOf("[");
+  const firstObj = s.indexOf("{");
+  let start = -1;
+  if (firstArr === -1) start = firstObj;
+  else if (firstObj === -1) start = firstArr;
+  else start = Math.min(firstArr, firstObj);
+  if (start === -1) return null;
+  const open = s[start];
+  const close = open === "[" ? "]" : "}";
+  const end = s.lastIndexOf(close);
+  if (end <= start) return null;
+  try {
+    return JSON.parse(s.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+const ORCH_HELP = `cc-delegate orchestrate — a delegated model coordinates a fan-out of worker jobs
+
+Usage:
+  cc-delegate orchestrate [flags] "<one big brief to decompose>"
+  cc-delegate orchestrate [flags] --tasks tasks.json
+
+The orchestrator model plans/decomposes and reviews; each task runs on a worker
+model in its OWN git worktree (isolated), is reviewed, and only clean+passing
+patches are merged back. Conflicts/failures/flags are returned for you to handle.
+It NEVER self-approves — you are the final verifier.
+
+Flags:
+  --orchestrator-model <alias>  planner + reviewer (default kimi-fast)
+  --worker-model <alias>        default executor per task (default deepseek-pro)
+  --tasks <path>                JSON array [{title, brief, model?}]; else decompose the brief
+  --max <n>                     cap number of tasks (default 8)
+  --json                        print the full report as JSON
+  --prompt-file <path>          read the brief from a file
+
+tasks.json shape: [{ "title": "...", "brief": "self-contained instructions", "model": "qwen" }]`;
+
+async function orchestrateCommand(cwd, flags, positionals) {
+  if (flags.help) {
+    process.stdout.write(`${ORCH_HELP}\n`);
+    return 0;
+  }
+  // orchestrate needs a git repo (workers isolate in worktrees, patches merge back)
+  try {
+    await execFileAsyncOrThrow(cwd);
+  } catch (err) {
+    throw new Error(`orchestrate requires a git repository at ${cwd}: ${err.message}`);
+  }
+
+  const orchestratorModel = String(flags["orchestrator-model"] || "kimi-fast");
+  const workerModel = String(flags["worker-model"] || "deepseek-pro");
+  const maxTasks = flags.max !== undefined ? Number(flags.max) : 8;
+
+  // Read an explicit task list, or a brief to decompose.
+  let tasks = null;
+  let brief = null;
+  if (typeof flags.tasks === "string") {
+    const raw = await fs.readFile(path.resolve(flags.tasks), "utf8");
+    const parsed = parseJsonLoose(raw);
+    if (!Array.isArray(parsed) || !parsed.length) {
+      throw new Error(`--tasks ${flags.tasks} must be a non-empty JSON array of {title, brief}`);
+    }
+    tasks = parsed.slice(0, maxTasks);
+  } else {
+    brief = await readPrompt(flags, positionals);
+    if (!brief.trim()) {
+      throw new Error("orchestrate needs a brief (positional/--prompt-file) or --tasks <file>");
+    }
+  }
+
+  // A tracked text/agentic job run inline; returns the completed job.
+  const inlineTask = async (jobCwd, request, preview) => {
+    const job = await createJob(jobCwd, {
+      cwd: jobCwd,
+      command: "task",
+      model: request.model,
+      promptPreview: preview,
+      request,
+    });
+    return runTask(jobCwd, job);
+  };
+
+  const deps = {
+    log: (m) => process.stderr.write(`${m}\n`),
+    planTasks: async (theBrief, model) => {
+      const prompt =
+        `Decompose the following software task into a list of BOUNDED, independent sub-tasks, each safe to hand to a fresh model with no memory. ` +
+        `Return ONLY a JSON array; each element: {"title": short label, "brief": fully self-contained instructions incl. file paths and what "done" means, "model": optional alias}. ` +
+        `Prefer few substantial tasks over many micro-tasks. Max ${maxTasks} tasks.\n\nTASK:\n${theBrief}`;
+      const job = await inlineTask(cwd, { model, system: DEFAULT_SYSTEM, prompt, agentic: false }, "orchestrate:plan");
+      const parsed = parseJsonLoose(job.result?.content);
+      // Accept a bare array OR the common {"tasks": [...]} wrapper.
+      const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.tasks) ? parsed.tasks : []);
+      if (!arr.length) {
+        throw new Error("orchestrator planner returned no usable tasks (model output was not a task array) — refine the brief or pass --tasks");
+      }
+      return { tasks: arr.slice(0, maxTasks), costUsd: job.cost || 0 };
+    },
+    runWorker: async (task, repoDir) => {
+      const job = await inlineTask(
+        repoDir,
+        { model: task.model || workerModel, system: DEFAULT_SYSTEM, prompt: task.brief, agentic: true, write: true, isolate: true, deferMerge: true },
+        task.title || "orchestrate:worker",
+      );
+      return {
+        ok: job.status === "completed",
+        patch: job.jobPatch || "",
+        evidence: job.result?.content || job.error || "",
+        costUsd: job.cost || 0,
+      };
+    },
+    reviewResult: async ({ task, patch, evidence }, model) => {
+      const prompt =
+        `You are reviewing a delegated worker's patch for this task. Respond ONLY with JSON: {"verdict": "pass"|"fail"|"unsure", "findings": [short strings]}. ` +
+        `"pass" only if the patch correctly and completely does the task with no obvious bug. Be strict; "unsure" if you can't tell.\n\n` +
+        `TASK: ${task.title}\n${task.brief}\n\nWORKER NOTE:\n${(evidence || "").slice(0, 2000)}\n\nPATCH:\n${patch.slice(0, 12000)}`;
+      const job = await inlineTask(cwd, { model, system: DEFAULT_SYSTEM, prompt, agentic: false }, "orchestrate:review");
+      const parsed = parseJsonLoose(job.result?.content) || {};
+      const verdict = ["pass", "fail", "unsure"].includes(parsed.verdict) ? parsed.verdict : "unsure";
+      return { verdict, findings: Array.isArray(parsed.findings) ? parsed.findings : [], costUsd: job.cost || 0 };
+    },
+    mergePatchBack: (repoDir, patch) => mergePatchBack(repoDir, patch),
+  };
+
+  process.stderr.write(`orchestrating with ${orchestratorModel} (plan+review), workers default ${workerModel}…\n`);
+  const report = await runOrchestration({
+    tasks,
+    brief,
+    repoDir: cwd,
+    workerModel,
+    orchestratorModel,
+    deps,
+  });
+
+  if (flags.json) {
+    printJson(report);
+    return report.requiresSeniorReview.length ? 1 : 0;
+  }
+
+  const L = [];
+  L.push("");
+  L.push(`orchestration complete — ${report.tasks.length} task(s)`);
+  for (const t of report.tasks) {
+    L.push(`  [${t.status}] ${t.id} — ${t.title}${t.review ? ` (review: ${t.review.verdict})` : ""}`);
+  }
+  L.push("");
+  L.push(`merged: ${report.merged.length}  ·  conflicts: ${report.conflicts.length}  ·  flagged: ${report.flagged.length}  ·  failed: ${report.failed.length}  ·  empty: ${report.empty.length}`);
+  L.push(`cost — orchestrator $${report.cost.orchestratorUsd.toFixed(6)}  ·  workers $${report.cost.workersUsd.toFixed(6)}  ·  total $${report.cost.totalUsd.toFixed(6)}`);
+  if (report.requiresSeniorReview.length) {
+    L.push("");
+    L.push("⚠ requires your review (NOT merged / not trusted):");
+    for (const r of report.requiresSeniorReview) {
+      L.push(`  - ${r.id} ${r.title}: ${r.reason}`);
+    }
+    L.push("");
+    L.push("Inspect a task's own patch: cc-delegate result <jobId>  (jobPatch field). Merged tasks are already in your working tree — review the diff before committing.");
+  }
+  process.stdout.write(`${L.join("\n")}\n`);
+  return report.requiresSeniorReview.length ? 1 : 0;
+}
+
+// Throws unless cwd is inside a git work tree.
+async function execFileAsyncOrThrow(cwd) {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { stdout } = await run("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
+  if (stdout.trim() !== "true") throw new Error("not a git work tree");
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
     );
   }
 
@@ -3110,6 +3430,8 @@ async function main() {
       return 0;
     case "task":
       return taskCommand(cwd, flags, positionals);
+    case "orchestrate":
+      return orchestrateCommand(cwd, flags, positionals);
     case "task-worker":
       return taskWorkerCommand(cwd, flags);
     case "status":

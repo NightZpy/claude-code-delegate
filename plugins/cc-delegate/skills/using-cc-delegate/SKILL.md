@@ -91,6 +91,11 @@ Background + collect + iterate:
 ```
 **AGENTIC:** `/cc-delegate:task --agentic --model glm "read api/routes.ts and report the error-handling pattern"` · add `--write` to apply edits. Watch live tool activity with `cc-delegate watch <job-id>`.
 
+**Isolated writes** — add `--isolate` to an agentic `--write` job to run it in a throwaway git worktree; only that job's own patch is merged back, and a conflict is reported (patch saved on the job) instead of clobbering. Use it whenever a delegated write could collide with unrelated in-progress work in the tree.
+
+## 5b. Orchestrator mode — push coordination off your own context
+When you'd otherwise hand-orchestrate several bounded tasks (decompose, dispatch, group by file zone, review each, retry), delegate the *coordination itself*: `cc-delegate orchestrate --orchestrator-model kimi-fast --worker-model deepseek-pro "<one big brief>"` (or `--tasks tasks.json`). A strong orchestrator model plans, runs each task on a worker in its **own** isolated worktree, reviews, and merges only clean+passing patches; it returns per-task status, a **requires-your-review** list, and an orchestrator-vs-worker cost split. It **never self-approves** — you stay the final verifier: review merged patches in your tree, handle the flagged ones. Reach for it in balanced/economy intensity when the coordination would burn your session tokens; skip it for one or two tasks (just dispatch them directly). Workers run sequentially (safe v1).
+
 ## 6. Read the signals
 - **Cost/usage:** `/cc-delegate:usage` (TUI — tabs Overview/Details/Health/Quotas/Analyze; `g` scopes text/agentic) or `/cc-delegate:analyze` for an AI cost/health readout.
 - **Circuit-breaker advisory** in task output (`⚡ …degraded…`): a model+provider pair is unhealthy. The advisory ends with the exact retry flags (`→ retry: --model X --provider Y`) — use them on your next dispatch. **`--provider <name>` forces a specific route** (e.g. `--provider siliconflow` when a model's OpenRouter route is degraded); it works in both text and agentic mode.

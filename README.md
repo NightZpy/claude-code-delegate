@@ -112,6 +112,29 @@ Background tasks can be checked with `/cc-delegate:status`, fetched with `/cc-de
 /cc-delegate:task --agentic --write "apply the casing fixes I described in docs/naming.md"
 ```
 
+### Isolated writes (`--isolate`)
+
+`--isolate` (agentic `--write` only) runs the job inside a **throwaway git worktree** branched from `HEAD`, carrying your current tracked changes. Afterwards only *that job's own patch* is merged back into your working tree — a merge conflict is reported loudly and the patch is left un‑applied (saved on the job as `jobPatch`) instead of clobbering anything. Use it when a delegated write must not risk corrupting unrelated in‑progress work.
+
+```
+/cc-delegate:task --agentic --write --isolate --model glm "fix the failing test in api/"
+```
+
+### Orchestrator mode (`orchestrate`)
+
+`cc-delegate orchestrate` moves the *coordination itself* off your expensive session model. A delegated **orchestrator** model decomposes the work (or you hand it a task list), runs each task on a **worker** model in its own isolated worktree, reviews each result, and merges back only clean + passing patches. It **never self‑approves** — failures, conflicts and low‑confidence reviews come back on a "requires your review" list, and the report splits cost by orchestrator vs workers.
+
+```
+# one brief, auto‑decomposed:
+cc-delegate orchestrate --orchestrator-model kimi-fast --worker-model deepseek-pro \
+  "migrate the logging module to structured logs and make the build pass"
+
+# or an explicit task list:
+cc-delegate orchestrate --tasks tasks.json     # [{ "title": "...", "brief": "...", "model": "qwen" }]
+```
+
+Workers run **sequentially** (one isolated worktree at a time — the safe v1; parallel per‑worker servers are a documented follow‑up). You remain the final verifier: merged patches are in your tree for review, flagged ones are not.
+
 Resume reuses the native OpenCode session, retaining full tool‑call history. Manage the OpenCode backend directly:
 
 ```
@@ -148,7 +171,8 @@ cc-delegate opencode stop
 | --- | --- |
 | `setup` | Check runtime readiness |
 | `models` | Print model matrix (`--guide` for provider guide) |
-| `task` | Dispatch a delegation (accepts `--agentic`, `--write`, `--background`, etc.) |
+| `task` | Dispatch a delegation (accepts `--agentic`, `--write`, `--isolate`, `--background`, etc.) |
+| `orchestrate` | Delegated‑model orchestrator: fan out bounded tasks to isolated workers, review, merge clean patches back (`--orchestrator-model`, `--worker-model`, `--tasks`) |
 | `status` | Show job status |
 | `result` | Print a finished job’s output |
 | `cancel` | Cancel a running job |
