@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-07-23
+
+### Added
+- `task --agentic --write --isolate`: run a delegated write inside a throwaway git worktree (branched from HEAD, carrying tracked changes), then merge back only that job's own patch. A merge conflict is reported and the patch saved on the job (`jobPatch`) instead of clobbering the working tree.
+- `orchestrate` subcommand: a delegated orchestrator model decomposes work (or takes `--tasks`), runs each task on a worker model in its own isolated worktree, reviews each result, and merges back only clean + passing patches. Returns per-task status, a "requires your review" list, and an orchestrator-vs-worker cost split. Never self-approves; workers run sequentially (v1).
+- `lib/worktree.mjs` and `lib/orchestrate.mjs`, each with a runnable `--selftest`.
+
+### Fixed
+- The usage TUI Details tab now shows in-flight (running/queued) jobs, which live in job state and never in the ledger — previously only finished jobs appeared.
+
 ## [0.15.6] - 2026-07-22
 
 ### Fixed
