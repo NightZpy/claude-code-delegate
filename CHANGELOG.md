@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-07-23
+
+### Added
+- **`cc-delegate jobs` — a panel so you can see what delegated jobs are actually doing.** Because jobs run through Bash, nothing about them is rendered the way Claude Code renders its own subagents, leaving the user blind. In a real terminal this is an interactive panel: ↑/↓ to select a job, **enter to open it** and watch its live log + tool activity, ←/esc back, `r` reload, `q` quit. When output is captured (inside Claude Code, or `/cc-delegate:jobs`) it prints a static snapshot of every job plus the live detail of each running one — no orchestrator context spent.
+- `lib/jobs-tui.mjs` (self-tested pure renderers + the interactive loop).
+
+### Note
+- The ACTIVITY section fills in from OpenCode's session messages, which only expose a turn's tool parts once that turn completes; the LOG section is the reliable second-by-second signal while a job is in flight (same behaviour as `watch`).
+
 ## [0.19.1] - 2026-07-23
 
 ### Changed

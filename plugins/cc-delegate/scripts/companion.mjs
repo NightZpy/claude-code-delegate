@@ -21,6 +21,7 @@ import {
 import { loadConfig, saveConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker, appendUsageLedger } from "./lib/jobs.mjs";
 import { runAgenticWorkersParallel } from "./lib/agentic-parallel.mjs";
+import { runJobsTui, renderJobList, renderJobDetail } from "./lib/jobs-tui.mjs";
 import { diffOfFiles, reconcileClaims } from "./lib/write-verify.mjs";
 import {
   checkServerHealth,
@@ -3663,6 +3664,120 @@ async function reconcileCommand(flags) {
   return 0;
 }
 
+const JOBS_HELP = `cc-delegate jobs — browse delegated jobs and watch a running one live
+
+Usage: cc-delegate jobs [--static] [--json]
+
+Interactive panel (in a real terminal): ↑/↓ select a job · enter to open it and
+watch its live tool activity + log · ←/esc back · r reload · q quit.
+When output is captured (e.g. inside Claude Code) it prints a static snapshot of
+all jobs plus the live activity of every running one — no interactivity needed.
+
+Flags:
+  --static   force the snapshot even in a terminal
+  --json     machine-readable job list`;
+
+// A panel so a human can see what delegated jobs are actually doing. Jobs run via
+// Bash, so unlike Claude Code's own subagents nothing is rendered for the user —
+// this closes that blind spot WITHOUT spending orchestrator context.
+async function jobsCommand(cwd, flags) {
+  if (flags.help) {
+    process.stdout.write(`${JOBS_HELP}\n`);
+    return 0;
+  }
+  const styles = usageStyles();
+  const cols = () => process.stdout.columns || 100;
+  // A running job's updatedAt doesn't tick, so its elapsed must be measured
+  // against NOW — otherwise the panel shows a frozen timer while work proceeds.
+  const elapsedOf = (j) => {
+    const live = j.status === "running" || j.status === "queued";
+    const end = live ? Date.now() : Date.parse(j.completedAt || j.cancelledAt || j.updatedAt || new Date().toISOString());
+    return Math.max(0, end - Date.parse(j.createdAt));
+  };
+
+  const fetchList = async () => {
+    const summaries = (await listJobs(cwd)).slice(0, 30);
+    const full = await Promise.all(summaries.map((s) => loadJob(cwd, s.id).catch(() => null)));
+    return summaries.map((s, i) => {
+      const f = full[i];
+      return {
+        id: s.id,
+        status: s.status,
+        model: s.model || "-",
+        mode: (f && (f.mode || (f.request?.agentic ? "agentic" : "text"))) || "text",
+        elapsedMs: elapsedOf(s),
+        preview: s.promptPreview || "",
+      };
+    });
+  };
+
+  const fetchDetail = async (id) => {
+    const job = await loadJob(cwd, id);
+    if (!job) {
+      return { job: { id, status: "unknown", model: "-", mode: "-", elapsedMs: 0 }, activity: [], logTail: "" };
+    }
+    let activity = [];
+    if (job.opencodeSessionId) {
+      try {
+        const st = await readServerState(CC_DELEGATE_HOME);
+        if (st) {
+          const server = { base: st.base, auth: makeBasicAuth(st.password) };
+          activity = summarizeActivity(await listMessages(server, job.opencodeSessionId));
+        }
+      } catch {
+        // best-effort — the log tail still shows progress
+      }
+    }
+    // readJobLogTail returns an ARRAY of lines — the renderer wants raw text.
+    let logTail = "";
+    try {
+      const tail = await readJobLogTail(cwd, id, 40);
+      logTail = Array.isArray(tail) ? tail.join("\n") : String(tail || "");
+    } catch {}
+    return {
+      job: {
+        id: job.id,
+        status: job.status,
+        model: job.model || "-",
+        mode: job.mode || (job.request?.agentic ? "agentic" : "text"),
+        elapsedMs: elapsedOf(job),
+        error: job.error,
+      },
+      activity,
+      logTail,
+    };
+  };
+
+  const interactive = !flags.static && !flags.json && process.stdout.isTTY && process.stdin.isTTY;
+  if (interactive) {
+    await runJobsTui({
+      listJobs: fetchList,
+      getDetail: fetchDetail,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      styles,
+    });
+    return 0;
+  }
+
+  const rows = await fetchList();
+  if (flags.json) {
+    printJson(rows);
+    return 0;
+  }
+  const out = [renderJobList(rows, -1, styles, cols())];
+  // A captured snapshot is only useful if it also shows what the live jobs are doing.
+  for (const r of rows.filter((x) => x.status === "running" || x.status === "queued")) {
+    const d = await fetchDetail(r.id);
+    out.push("", renderJobDetail(d.job, d.activity, d.logTail, styles, cols()));
+  }
+  if (!process.stdout.isTTY) {
+    out.push("", styles.dim("tip: run `cc-delegate jobs` in your own terminal for the interactive panel (↑/↓ select · enter open)"));
+  }
+  process.stdout.write(`${out.join("\n")}\n`);
+  return 0;
+}
+
 // Inspect or clear the agentic run slot. Agentic jobs serialize on a single
 // lock; a crashed holder is now reclaimed by liveness automatically, but this
 // gives an operator a way to see/force-clear a wedged slot.
@@ -3708,7 +3823,7 @@ async function main() {
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, jobs, watch, uninstall, link",
     );
   }
 
@@ -3725,6 +3840,8 @@ async function main() {
       return orchestrateCommand(cwd, flags, positionals);
     case "slot":
       return slotCommand(flags);
+    case "jobs":
+      return jobsCommand(cwd, flags);
     case "reconcile":
       return reconcileCommand(flags);
     case "task-worker":
