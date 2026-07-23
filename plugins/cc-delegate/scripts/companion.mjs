@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { watch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -58,6 +59,7 @@ import {
   readJobLogTail,
   jobLogFilePath,
   updateJob,
+  getWorkspaceState,
 } from "./lib/state.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -2685,6 +2687,7 @@ Flags:
   --diff                attach \`git diff HEAD\` as context
   --resume <jobId|last> continue a previous job's thread
   --background          run detached; prints {jobId}; collect with status/result/watch
+  --await [--timeout <sec>] dispatch and block until terminal; implies --background
   --system <text>       override the system prompt
   --max-tokens <n>      cap output tokens
   --call-timeout <sec>  max seconds for one model call (default 900; agentic)
@@ -2702,7 +2705,7 @@ async function taskCommand(cwd, flags, positionals) {
   }
   const job = await createTaskJob(cwd, flags, positionals);
 
-  if (flags.background) {
+  if (flags.background || flags.await) {
     const workerLog = await jobLogFilePath(cwd, job.id);
     const workerPid = spawnBackgroundWorker(ENTRYPOINT, cwd, job.id, workerLog);
     const queued = await updateJob(cwd, job.id, {
@@ -2710,6 +2713,12 @@ async function taskCommand(cwd, flags, positionals) {
       pid: workerPid,
     });
     await appendJobLog(cwd, job.id, `background worker spawned with pid ${workerPid}`);
+    
+    if (flags.await) {
+      // Fused task --await: dispatch then block until terminal
+      return awaitCommand(cwd, flags, [queued.id]);
+    }
+    
     printJson({ jobId: queued.id });
     return 0;
   }
@@ -2718,13 +2727,14 @@ async function taskCommand(cwd, flags, positionals) {
   if (flags.json) {
     printJson(completed);
   } else if (completed.status === "completed") {
-    process.stdout.write(`${buildAlertPrefix(completed)}${completed.result?.content || ""}\n`);
+    process.stdout.write(`${buildAlertPrefix(completed)}${completed.result?.content || ""}
+`);
   } else {
-    process.stderr.write(`${buildAlertPrefix(completed)}${jobErrorMessage(completed)}\n`);
+    process.stderr.write(`${buildAlertPrefix(completed)}${jobErrorMessage(completed)}
+`);
   }
   return completed.status === "completed" ? 0 : 1;
 }
-
 async function taskWorkerCommand(cwd, flags) {
   const jobId = String(flags["job-id"] || "");
   if (!jobId) {
@@ -3199,6 +3209,190 @@ async function gateCommand(positionals) {
   await saveConfig({ ...config, reviewGate: arg });
   process.stdout.write(`review gate set to: ${arg}\n`);
   return 0;
+}
+
+
+// Exit code mapping for await command
+function getJobExitCode(job) {
+  const isIncomplete = job.incomplete === true;
+  if (isIncomplete) return 21;
+  
+  switch (job.status) {
+    case "completed":
+      return 0;
+    case "failed":
+      return 20;
+    case "cancelled":
+      return 22;
+    default:
+      // still running
+      return 23;
+  }
+}
+
+// Get worst exit code from multiple jobs: failed(20) > incomplete(21) > cancelled(22) > timeout(23) > completed(0)
+function getWorstExitCode(codes) {
+  const ordered = [20, 21, 22, 23, 0];
+  for (const code of ordered) {
+    if (codes.includes(code)) return code;
+  }
+  return 0;
+}
+
+// Build clean JSON payload for await --json output
+async function buildAwaitPayload(job) {
+  const isIncomplete = job.incomplete === true;
+  const elapsedMs = Math.max(0, Date.parse(job.completedAt || job.cancelledAt || job.updatedAt) - Date.parse(job.createdAt));
+  
+  return {
+    jobId: job.id,
+    status: isIncomplete ? "incomplete" : job.status,
+    result: job.result?.content ?? job.error ?? null,
+    costUsd: typeof job.cost === "number" ? job.cost : 0,
+    elapsedMs,
+    model: job.result?.alias || job.model,
+    provider: job.result?.provider || job.provider,
+  };
+}
+
+async function awaitCommand(cwd, flags, positionals) {
+  const jobIds = positionals.filter(Boolean);
+  if (jobIds.length === 0) {
+    throw new Error("await requires at least one job id");
+  }
+
+  let timeoutSec = null;
+  if (flags.timeout != null) {
+    const parsed = Number(flags.timeout);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error("--timeout requires a positive number of seconds");
+    }
+    timeoutSec = parsed;
+  }
+  const startTime = Date.now();
+  const isMultiJob = jobIds.length > 1;
+
+  // Watch a single job until terminal
+  async function watchUntilTerminal(jobId) {
+    const workspace = await getWorkspaceState(cwd);
+    const jobPath = path.join(workspace.jobsDir, `${jobId}.json`);
+
+    let currentJob = await loadJob(cwd, jobId);
+    if (!currentJob) {
+      throw new Error(`job ${jobId} not found`);
+    }
+
+    // Already terminal?
+    if (["completed", "failed", "cancelled"].includes(currentJob.status)) {
+      return currentJob;
+    }
+
+    // Watch the file and poll with fallback
+    return new Promise((resolve, reject) => {
+      let watcher;
+      let pollInterval;
+
+      const cleanup = () => {
+        if (watcher) {
+          try {
+            watcher.close();
+          } catch {}
+        }
+        if (pollInterval) {
+          clearInterval(pollInterval);
+        }
+      };
+
+      const checkJob = async () => {
+        try {
+          const latest = await loadJob(cwd, jobId);
+          if (latest && ["completed", "failed", "cancelled"].includes(latest.status)) {
+            cleanup();
+            resolve(latest);
+            return;
+          }
+
+          // Check timeout
+          if (timeoutSec !== null) {
+            const elapsedSec = (Date.now() - startTime) / 1000;
+            if (elapsedSec >= timeoutSec) {
+              cleanup();
+              resolve(latest || currentJob);
+              return;
+            }
+          }
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      };
+
+      // Set up file watcher
+      try {
+        watcher = watch(jobPath, (eventType, filename) => {
+          checkJob().catch(() => {});
+        });
+      } catch {
+        // watch might fail if file doesn't exist yet; ignore
+      }
+
+      // Fallback poll every ~1000ms
+      pollInterval = setInterval(checkJob, 1000);
+
+      // Initial check
+      checkJob().catch(() => {});
+    });
+  }
+
+  // Wait for all to be terminal (concurrent)
+  const finalJobList = await Promise.all(jobIds.map(id => watchUntilTerminal(id)));
+  const finalJobs = {};
+  for (let i = 0; i < jobIds.length; i++) {
+    finalJobs[jobIds[i]] = finalJobList[i];
+  }
+
+  // Build output
+  const exitCodes = [];
+  const outputs = [];
+
+  for (const jobId of jobIds) {
+    const job = finalJobs[jobId];
+    const exitCode = getJobExitCode(job);
+    exitCodes.push(exitCode);
+
+    if (flags.json) {
+      const payload = await buildAwaitPayload(job);
+      outputs.push(payload);
+    } else {
+      // Reuse result rendering logic
+      const isIncomplete = job.incomplete === true;
+      const alertPrefix = buildAlertPrefix(job);
+      const resumedLine = job.resumedFrom ? `resumed from ${job.resumedFrom}\n` : "";
+      const output = job.result?.content || job.error || "no output stored";
+
+      process.stdout.write(`${resumedLine}${alertPrefix}${output}\n`);
+      if (
+        (job.status === "failed" || isIncomplete) &&
+        Array.isArray(job.result?.touchedFiles) &&
+        job.result.touchedFiles.length > 0
+      ) {
+        process.stdout.write(
+          `modified before failure: ${job.result.touchedFiles.join(", ")} (review before retrying)\n`,
+        );
+      }
+    }
+  }
+
+  if (flags.json) {
+    if (isMultiJob) {
+      printJson(outputs);
+    } else {
+      printJson(outputs[0]);
+    }
+  }
+
+  const finalCode = getWorstExitCode(exitCodes);
+  return finalCode;
 }
 
 async function watchCommand(cwd, flags, positionals) {
@@ -3823,7 +4017,7 @@ async function main() {
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, jobs, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, await, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, jobs, watch, uninstall, link",
     );
   }
 
@@ -3852,6 +4046,8 @@ async function main() {
     case "result":
       await resultCommand(cwd, flags, positionals);
       return 0;
+    case "await":
+      return awaitCommand(cwd, flags, positionals);
     case "cancel":
       await cancelCommand(cwd, positionals);
       return 0;

@@ -89,6 +89,49 @@ openrouter: sk-or-v1-…  … ready
 
 ## Usage
 
+
+### Blocking await (`await`)
+
+Block until one or more background jobs reach a terminal state (completed, failed, cancelled, or incomplete). Prints the result of each job and exits with a code indicating the outcome.
+
+```
+cc-delegate await <jobId> [<jobId> ...] [--timeout <sec>] [--json]
+cc-delegate task --await [--timeout <sec>] --model <m> "<brief>"  # fused: dispatch + await
+```
+
+**Exit codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | All jobs completed successfully |
+| 20 | One or more jobs failed |
+| 21 | One or more jobs incomplete (partial result stored) |
+| 22 | One or more jobs cancelled |
+| 23 | Timeout reached (job still running — not cancelled) |
+
+For multiple jobs, the worst code wins: failed(20) > incomplete(21) > cancelled(22) > timeout(23) > completed(0).
+
+**Flags:**
+- `--timeout <sec>`: Exit after N seconds if still running (default: infinite). This is the **total wall-clock timeout** across all awaited jobs — not a per-job limit.
+- `--json`: Print result as JSON (7 fields: jobId, status, result, costUsd, elapsedMs, model, provider). Note: when used with `task --await --json`, the output is **the await payload** (the 7 fields above), not the task-dispatch JSON.
+
+**Examples:**
+```
+# Await a single job
+cc-delegate await task-abc123def456 --json
+
+# Await multiple jobs; exit with worst outcome
+cc-delegate await job1 job2 job3
+
+# Dispatch + await (fused convenience)
+cc-delegate task --await --model qwen --timeout 60 "write unit tests"
+
+# Inside a background harness: capture the result and exit code
+cc-delegate await <id> --json | jq . && echo "Job done"
+```
+
+**Pattern:** Run `cc-delegate await <id> --json` inside a harness background shell so the harness fires its native 'background task finished' notification only when the job is genuinely terminal — no polling required.
+
+
 ### TEXT mode examples
 
 ```
