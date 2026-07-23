@@ -35,6 +35,11 @@ async function appendUsageLedger(job) {
     return;
   }
 
+  // Provider-side request id (OpenRouter gen-…, SiliconFlow chatcmpl-…). Lets a
+  // ledger row be reconciled against the provider's own activity/billing log —
+  // so a call that billed but our side mis-recorded isn't an orphan.
+  const providerRequestId = job.providerRequestId ?? job.result?.raw?.id ?? null;
+
   const row = {
     ts: new Date().toISOString(),
     workspace: job.workspaceRoot || job.cwd || process.cwd(),
@@ -51,6 +56,9 @@ async function appendUsageLedger(job) {
     attempts: attempts || 1,
     failedProviders,
     ctxPct: job.ctxPct ?? null,
+    // Additive: only present when the provider returned an id (absent on
+    // no-response timeouts, where provider+ts still allow manual cross-check).
+    ...(providerRequestId ? { providerRequestId } : {}),
     // Additive: agentic rows carry mode:"agentic"; text-mode rows (and all
     // historical rows) have no field at all, which readers treat as "text".
     ...(job.mode ? { mode: job.mode } : {}),
