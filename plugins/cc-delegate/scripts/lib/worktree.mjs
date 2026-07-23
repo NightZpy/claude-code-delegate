@@ -128,10 +128,14 @@ export async function createIsolatedWorktree(repoDir) {
     }
 
     // Commit the baseline inside the worktree so job changes are later
-    // just "everything since the snapshot".
-    let snapshotCommit;
-    try {
-      await git(worktreeDir, ['add', '-A']);
+    // just "everything since the snapshot". A clean tree has nothing to
+    // commit — git exits non-zero and prints "nothing to commit" to STDOUT
+    // (not stderr), so detect the empty case explicitly instead of relying on
+    // the commit error, and keep the snapshot at base.
+    let snapshotCommit = base;
+    await git(worktreeDir, ['add', '-A']);
+    const { code: hasStaged } = await gitNoThrow(worktreeDir, ['diff', '--cached', '--quiet']);
+    if (hasStaged !== 0) {
       await git(worktreeDir, [
         '-c',
         'user.email=cc-delegate@local',
@@ -143,16 +147,6 @@ export async function createIsolatedWorktree(repoDir) {
         '--no-verify',
       ]);
       snapshotCommit = await git(worktreeDir, ['rev-parse', 'HEAD']);
-    } catch (commitErr) {
-      // If there was nothing to commit (clean tree), snapshot is base.
-      if (
-        commitErr.stderr &&
-        commitErr.stderr.includes('nothing to commit')
-      ) {
-        snapshotCommit = base;
-      } else {
-        throw commitErr;
-      }
     }
 
     // Build the cleanup closure before returning so the caller can reliably

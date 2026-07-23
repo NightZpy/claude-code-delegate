@@ -2129,6 +2129,13 @@ async function runIsolatedAgentic(repoDir, job, models, request, tools) {
       await tools.log("isolated run produced no file changes — nothing to merge");
       return result;
     }
+    // deferMerge: the orchestrator merges after review — the worker only captures.
+    if (request.deferMerge) {
+      await tools.setJob({ jobPatch: patch });
+      if (result.result) result.result.jobPatch = patch;
+      await tools.log(`isolated patch captured (${(result.result?.touchedFiles || []).length} file(s)); merge deferred to orchestrator`);
+      return result;
+    }
     const merge = await mergePatchBack(repoDir, patch);
     const files = result.result?.touchedFiles || [];
     await tools.setJob({ jobPatch: patch, merged: merge.applied });
@@ -3161,12 +3168,185 @@ async function printFinalActivity(job) {
   } catch {}
 }
 
+// Best-effort extract a JSON value from a model reply that may wrap it in prose
+// or ```json fences. Returns the parsed value or null.
+function parseJsonLoose(text) {
+  if (!text) return null;
+  let s = String(text).replace(/```(?:json)?/gi, "").trim();
+  const firstArr = s.indexOf("[");
+  const firstObj = s.indexOf("{");
+  let start = -1;
+  if (firstArr === -1) start = firstObj;
+  else if (firstObj === -1) start = firstArr;
+  else start = Math.min(firstArr, firstObj);
+  if (start === -1) return null;
+  const open = s[start];
+  const close = open === "[" ? "]" : "}";
+  const end = s.lastIndexOf(close);
+  if (end <= start) return null;
+  try {
+    return JSON.parse(s.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+const ORCH_HELP = `cc-delegate orchestrate — a delegated model coordinates a fan-out of worker jobs
+
+Usage:
+  cc-delegate orchestrate [flags] "<one big brief to decompose>"
+  cc-delegate orchestrate [flags] --tasks tasks.json
+
+The orchestrator model plans/decomposes and reviews; each task runs on a worker
+model in its OWN git worktree (isolated), is reviewed, and only clean+passing
+patches are merged back. Conflicts/failures/flags are returned for you to handle.
+It NEVER self-approves — you are the final verifier.
+
+Flags:
+  --orchestrator-model <alias>  planner + reviewer (default kimi-fast)
+  --worker-model <alias>        default executor per task (default deepseek-pro)
+  --tasks <path>                JSON array [{title, brief, model?}]; else decompose the brief
+  --max <n>                     cap number of tasks (default 8)
+  --json                        print the full report as JSON
+  --prompt-file <path>          read the brief from a file
+
+tasks.json shape: [{ "title": "...", "brief": "self-contained instructions", "model": "qwen" }]`;
+
+async function orchestrateCommand(cwd, flags, positionals) {
+  if (flags.help) {
+    process.stdout.write(`${ORCH_HELP}\n`);
+    return 0;
+  }
+  // orchestrate needs a git repo (workers isolate in worktrees, patches merge back)
+  try {
+    await execFileAsyncOrThrow(cwd);
+  } catch (err) {
+    throw new Error(`orchestrate requires a git repository at ${cwd}: ${err.message}`);
+  }
+
+  const orchestratorModel = String(flags["orchestrator-model"] || "kimi-fast");
+  const workerModel = String(flags["worker-model"] || "deepseek-pro");
+  const maxTasks = flags.max !== undefined ? Number(flags.max) : 8;
+
+  // Read an explicit task list, or a brief to decompose.
+  let tasks = null;
+  let brief = null;
+  if (typeof flags.tasks === "string") {
+    const raw = await fs.readFile(path.resolve(flags.tasks), "utf8");
+    const parsed = parseJsonLoose(raw);
+    if (!Array.isArray(parsed) || !parsed.length) {
+      throw new Error(`--tasks ${flags.tasks} must be a non-empty JSON array of {title, brief}`);
+    }
+    tasks = parsed.slice(0, maxTasks);
+  } else {
+    brief = await readPrompt(flags, positionals);
+    if (!brief.trim()) {
+      throw new Error("orchestrate needs a brief (positional/--prompt-file) or --tasks <file>");
+    }
+  }
+
+  // A tracked text/agentic job run inline; returns the completed job.
+  const inlineTask = async (jobCwd, request, preview) => {
+    const job = await createJob(jobCwd, {
+      cwd: jobCwd,
+      command: "task",
+      model: request.model,
+      promptPreview: preview,
+      request,
+    });
+    return runTask(jobCwd, job);
+  };
+
+  const deps = {
+    log: (m) => process.stderr.write(`${m}\n`),
+    planTasks: async (theBrief, model) => {
+      const prompt =
+        `Decompose the following software task into a list of BOUNDED, independent sub-tasks, each safe to hand to a fresh model with no memory. ` +
+        `Return ONLY a JSON array; each element: {"title": short label, "brief": fully self-contained instructions incl. file paths and what "done" means, "model": optional alias}. ` +
+        `Prefer few substantial tasks over many micro-tasks. Max ${maxTasks} tasks.\n\nTASK:\n${theBrief}`;
+      const job = await inlineTask(cwd, { model, system: DEFAULT_SYSTEM, prompt, agentic: false }, "orchestrate:plan");
+      const parsed = parseJsonLoose(job.result?.content);
+      const list = Array.isArray(parsed) ? parsed.slice(0, maxTasks) : [];
+      return { tasks: list, costUsd: job.cost || 0 };
+    },
+    runWorker: async (task, repoDir) => {
+      const job = await inlineTask(
+        repoDir,
+        { model: task.model || workerModel, system: DEFAULT_SYSTEM, prompt: task.brief, agentic: true, write: true, isolate: true, deferMerge: true },
+        task.title || "orchestrate:worker",
+      );
+      return {
+        ok: job.status === "completed",
+        patch: job.jobPatch || "",
+        evidence: job.result?.content || job.error || "",
+        costUsd: job.cost || 0,
+      };
+    },
+    reviewResult: async ({ task, patch, evidence }, model) => {
+      const prompt =
+        `You are reviewing a delegated worker's patch for this task. Respond ONLY with JSON: {"verdict": "pass"|"fail"|"unsure", "findings": [short strings]}. ` +
+        `"pass" only if the patch correctly and completely does the task with no obvious bug. Be strict; "unsure" if you can't tell.\n\n` +
+        `TASK: ${task.title}\n${task.brief}\n\nWORKER NOTE:\n${(evidence || "").slice(0, 2000)}\n\nPATCH:\n${patch.slice(0, 12000)}`;
+      const job = await inlineTask(cwd, { model, system: DEFAULT_SYSTEM, prompt, agentic: false }, "orchestrate:review");
+      const parsed = parseJsonLoose(job.result?.content) || {};
+      const verdict = ["pass", "fail", "unsure"].includes(parsed.verdict) ? parsed.verdict : "unsure";
+      return { verdict, findings: Array.isArray(parsed.findings) ? parsed.findings : [], costUsd: job.cost || 0 };
+    },
+    mergePatchBack: (repoDir, patch) => mergePatchBack(repoDir, patch),
+  };
+
+  process.stderr.write(`orchestrating with ${orchestratorModel} (plan+review), workers default ${workerModel}…\n`);
+  const report = await runOrchestration({
+    tasks,
+    brief,
+    repoDir: cwd,
+    workerModel,
+    orchestratorModel,
+    deps,
+  });
+
+  if (flags.json) {
+    printJson(report);
+    return report.requiresSeniorReview.length ? 1 : 0;
+  }
+
+  const L = [];
+  L.push("");
+  L.push(`orchestration complete — ${report.tasks.length} task(s)`);
+  for (const t of report.tasks) {
+    L.push(`  [${t.status}] ${t.id} — ${t.title}${t.review ? ` (review: ${t.review.verdict})` : ""}`);
+  }
+  L.push("");
+  L.push(`merged: ${report.merged.length}  ·  conflicts: ${report.conflicts.length}  ·  flagged: ${report.flagged.length}  ·  failed: ${report.failed.length}  ·  empty: ${report.empty.length}`);
+  L.push(`cost — orchestrator $${report.cost.orchestratorUsd.toFixed(6)}  ·  workers $${report.cost.workersUsd.toFixed(6)}  ·  total $${report.cost.totalUsd.toFixed(6)}`);
+  if (report.requiresSeniorReview.length) {
+    L.push("");
+    L.push("⚠ requires your review (NOT merged / not trusted):");
+    for (const r of report.requiresSeniorReview) {
+      L.push(`  - ${r.id} ${r.title}: ${r.reason}`);
+    }
+    L.push("");
+    L.push("Inspect a task's own patch: cc-delegate result <jobId>  (jobPatch field). Merged tasks are already in your working tree — review the diff before committing.");
+  }
+  process.stdout.write(`${L.join("\n")}\n`);
+  return report.requiresSeniorReview.length ? 1 : 0;
+}
+
+// Throws unless cwd is inside a git work tree.
+async function execFileAsyncOrThrow(cwd) {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const { stdout } = await run("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
+  if (stdout.trim() !== "true") throw new Error("not a git work tree");
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
     );
   }
 
@@ -3179,6 +3359,8 @@ async function main() {
       return 0;
     case "task":
       return taskCommand(cwd, flags, positionals);
+    case "orchestrate":
+      return orchestrateCommand(cwd, flags, positionals);
     case "task-worker":
       return taskWorkerCommand(cwd, flags);
     case "status":
