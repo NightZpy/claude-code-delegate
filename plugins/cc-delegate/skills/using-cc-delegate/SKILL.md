@@ -89,9 +89,29 @@ Background + collect + iterate:
 /cc-delegate:result <job-id>
 /cc-delegate:task --resume last "now add regression tests for finding #2"
 ```
+Zero-poll collect (no active wait in orchestrator context):
+```
+/cc-delegate:task --model kimi-fast --background "audit auth flows"
+# captures jobId → cc-delegate await <jobId> --json  in a background shell
+# harness notifies you when the job is terminal (file-watch, not polling)
+# exit code: 0=completed · 20=failed · 21=incomplete · 22=cancelled · 23=timeout
+```
+Fused dispatch+block (one invocation):
+```
+cc-delegate task --await --model kimi-fast "audit auth flows"  # dispatches, blocks, prints result, exits by outcome
+```
 **AGENTIC:** `/cc-delegate:task --agentic --model glm "read api/routes.ts and report the error-handling pattern"` · add `--write` to apply edits. Watch live tool activity with `cc-delegate watch <job-id>`.
 
 **Isolated writes** — add `--isolate` to an agentic `--write` job to run it in a throwaway git worktree; only that job's own patch is merged back, and a conflict is reported (patch saved on the job) instead of clobbering. Use it whenever a delegated write could collide with unrelated in-progress work in the tree.
+
+## Dispatch mechanism — bash+await vs the runner Agent
+
+You have two ways to dispatch, with different cost to YOUR (orchestrator) context:
+
+1. **Direct shell (cheapest):** `cc-delegate task --background ...` returns a jobId in milliseconds (near-zero orchestrator context). Collect with `cc-delegate await <jobId> --json` inside a **background shell** — the harness's native "background task finished" notification fires only when the job is genuinely terminal. Zero polling, no orchestrator forwarder turn.
+2. **`cc-delegate:runner` Agent** (Agent tool subagent): convenient and harness-tracked, but costs an **orchestrator forwarder turn** in expensive context every time.
+
+Prefer bash+await for one-shot dispatches and fire-many/collect-later. Use the `runner` Agent only when you specifically want the harness to track the delegation as a visible subagent.
 
 ## 5b. Orchestrator mode — push coordination off your own context
 When you'd otherwise hand-orchestrate several bounded tasks (decompose, dispatch, group by file zone, review each, retry), delegate the *coordination itself*: `cc-delegate orchestrate --orchestrator-model kimi-fast --worker-model deepseek-pro "<one big brief>"` (or `--tasks tasks.json`). A strong orchestrator model plans, runs each task on a worker in its **own** isolated worktree, reviews, and merges only clean+passing patches; it returns per-task status, a **requires-your-review** list, and an orchestrator-vs-worker cost split. It **never self-approves** — you stay the final verifier: review merged patches in your tree, handle the flagged ones. Reach for it in balanced/economy intensity when the coordination would burn your session tokens; skip it for one or two tasks (just dispatch them directly). Workers run **in parallel** — each is its own OpenCode session pinned to its own worktree, so N tasks execute concurrently; review and merge-back then happen sequentially. `--sequential` forces one-at-a-time.
@@ -114,7 +134,7 @@ When you'd otherwise hand-orchestrate several bounded tasks (decompose, dispatch
 ## Be proactive — never fire-and-forget
 After you dispatch, you MUST look at the outcome before doing anything else — especially for `--background` jobs. Don't assume success.
 - Foreground: read the returned output/error immediately.
-- Background: collect with `/cc-delegate:status` then `/cc-delegate:result <id>` (or `cc-delegate watch <id>` for live activity). Don't move on or report "done" until you've confirmed each job actually completed.
+- Background: collect with `/cc-delegate:status` then `/cc-delegate:result <id>` (or `cc-delegate watch <id>` for live activity). But **prefer zero-poll collection:** run `cc-delegate await <jobId> --json` in a background shell — the harness notifies you natively when the job reaches a terminal state, no orchestrator context burned on a polling loop. Don't move on or report "done" until you've confirmed each job actually completed.
 - **Check progress with `/cc-delegate:jobs`** — one snapshot of every job PLUS the live log/activity of each running one, so you can see what an in-flight delegation is doing without polling several commands. **The user cannot see your delegated jobs** (they run through Bash, so nothing renders the way Claude Code's own subagents do). When a job will run for a while, tell them they can run **`cc-delegate jobs` in their own terminal** for an interactive panel: ↑/↓ to select a job, enter to open it and watch it live, `q` to quit.
 - On a **failed** job: read the error AND any `⚡` advisory, then act — re-dispatch on the healthy route (`--provider …` / a different `--model`), don't silently retry the same broken route or quietly redo the work yourself.
 - Separately dispatched agentic jobs are **serialized** (they share one run slot) — launching several at once is fine, they queue; just remember to collect all of them. If you want real concurrency, use `orchestrate`, which fans its workers out in parallel inside one held slot.
@@ -129,3 +149,4 @@ For any brief longer than a line or two, write it to a file and pass `--prompt-f
 - Keep raw material in the delegate, not in your context — that's the whole point.
 - Apply and verify delegated output yourself; you are the judge.
 - Honor advisories: degraded → switch, quota → slow, overflow → bigger context.
+- Full per-command reference: references/commands.md

@@ -39,7 +39,9 @@ Now `cc-delegate` and `cc-delegate-keys` work from any terminal.
 
 ### TEXT mode (and AGENTIC’s API key)
 
-`cc-delegate-keys` walks you through the keys. **A single OpenRouter key covers every model in the fleet.** SiliconFlow is optional.
+`cc-delegate-keys` walks you through the keys. **A single OpenRouter key covers every model in the fleet.** SiliconFlow is optional (used as fallback for `kimi`, `deepseek`, and `glm` models only).
+
+**Provider routing:** The model registry (`models.json`) routes via **OpenRouter** (primary — used by every model) and **SiliconFlow** (fallback only for `kimi`/`deepseek`/`glm`). The transport layer also supports **DeepInfra** and **Cerebras**, but they are not currently mapped to any model in the registry — they are available to wire up by adding provider entries to `models.json` if desired.
 
 > **Run this in your own terminal — NOT inside a Claude Code `!` command.** The key must not pass through an agent's session. Keys are stored only in `~/.claude/cc-delegate/.env` (chmod 600) and never leave your machine except as the `Authorization` header to the provider you configured.
 
@@ -130,6 +132,21 @@ cc-delegate await <id> --json | jq . && echo "Job done"
 ```
 
 **Pattern:** Run `cc-delegate await <id> --json` inside a harness background shell so the harness fires its native 'background task finished' notification only when the job is genuinely terminal — no polling required.
+
+
+### Jobs panel (`jobs`)
+
+`cc-delegate jobs` opens an interactive panel of recent delegation jobs (up to 30). Running/queued jobs sort to the top; within each group, most recent first. A dimmed column header row (STATUS · ID · MODEL · MODE · ELAPSED · TASK) sits below the title bar.
+
+**Interactive keys:** `↑`/`↓` select a job · `enter` opens its detail view (streams live log when running) · `r` reloads · `f` cycles a status filter: `all → running → completed → failed → all` (active filter shown in title bar; filtering is over the already-loaded list, no refetch) · `q` quits.
+
+**Non-interactive output:** `cc-delegate jobs --static` prints a snapshot table (with header) to stdout; `--json` emits machine-readable rows.
+
+```
+cc-delegate jobs
+cc-delegate jobs --static
+cc-delegate jobs --json
+```
 
 
 ### TEXT mode examples
