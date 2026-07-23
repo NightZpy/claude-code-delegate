@@ -740,7 +740,12 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
 
 // buildUsageTabBody
 function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all', runningJobs = []) {
-  if (modeScope !== "all" && entries.length === 0 && runningJobs.length === 0) {
+  // Filter running jobs to the active scope BEFORE the empty-state guard, else
+  // an agentic job running under a `text` scope suppresses "no text delegations yet".
+  const scopedRunning = modeScope === "all"
+    ? (runningJobs || [])
+    : (runningJobs || []).filter((j) => (j.mode || "text") === modeScope);
+  if (modeScope !== "all" && entries.length === 0 && scopedRunning.length === 0) {
     return `  ${styles.dim(`no ${modeScope} delegations yet`)}`;
   }
   if (tabIndex === 3) {
@@ -767,13 +772,10 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
         : 20;
     const sorted = [...entries].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
     const limited = sorted.slice(0, Math.max(0, limit));
-    const running = (runningJobs || []).filter((j) =>
-      modeScope === "all" ? true : (j.mode || "text") === modeScope,
-    );
     if (modeScope === "agentic") {
-      return buildAgenticDetailsView(limited, styles, running);
+      return buildAgenticDetailsView(limited, styles, scopedRunning);
     }
-    return buildDetailsView(limited, styles, running);
+    return buildDetailsView(limited, styles, scopedRunning);
   }
 
   const normalized = entries.map(normalizeLedgerEntry);
@@ -2183,9 +2185,11 @@ async function runIsolatedAgentic(repoDir, job, models, request, tools) {
   }
   const originalCwd = process.cwd();
   const jobInWt = { ...job, cwd: wt.dir };
-  process.chdir(wt.dir);
-  await tools.log(`isolated worktree ${wt.dir} (base ${wt.base.slice(0, 8)})`);
   try {
+    // chdir + first log inside the try so an early throw still hits the finally
+    // (restore cwd + tear down the worktree) instead of stranding process.cwd().
+    process.chdir(wt.dir);
+    await tools.log(`isolated worktree ${wt.dir} (base ${wt.base.slice(0, 8)})`);
     const result = await executeAgenticTaskRequest(jobInWt, models, request, tools);
     const patch = await captureJobPatch(wt);
     if (!patch.trim()) {
@@ -3329,8 +3333,12 @@ async function orchestrateCommand(cwd, flags, positionals) {
         `Prefer few substantial tasks over many micro-tasks. Max ${maxTasks} tasks.\n\nTASK:\n${theBrief}`;
       const job = await inlineTask(cwd, { model, system: DEFAULT_SYSTEM, prompt, agentic: false }, "orchestrate:plan");
       const parsed = parseJsonLoose(job.result?.content);
-      const list = Array.isArray(parsed) ? parsed.slice(0, maxTasks) : [];
-      return { tasks: list, costUsd: job.cost || 0 };
+      // Accept a bare array OR the common {"tasks": [...]} wrapper.
+      const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.tasks) ? parsed.tasks : []);
+      if (!arr.length) {
+        throw new Error("orchestrator planner returned no usable tasks (model output was not a task array) — refine the brief or pass --tasks");
+      }
+      return { tasks: arr.slice(0, maxTasks), costUsd: job.cost || 0 };
     },
     runWorker: async (task, repoDir) => {
       const job = await inlineTask(

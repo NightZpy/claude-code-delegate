@@ -120,7 +120,7 @@ export async function createIsolatedWorktree(repoDir) {
 
   // Carry current tracked changes into the worktree, if any
   try {
-    const currentPatch = await gitRaw(absRepo, ['diff', 'HEAD']);
+    const currentPatch = await gitRaw(absRepo, ['diff', '--binary', 'HEAD']);
     if (currentPatch.trim().length > 0) {
       patchFilePath = path.join(os.tmpdir(), `cc-delegate-wt-patch-${hex}.patch`);
       await fs.writeFile(patchFilePath, currentPatch.endsWith('\n') ? currentPatch : currentPatch + '\n', 'utf-8');
@@ -209,7 +209,9 @@ export async function createIsolatedWorktree(repoDir) {
 export async function captureJobPatch(wt) {
   // Stage everything so untracked files appear in the diff
   await git(wt.dir, ['add', '-A']);
-  const patch = await gitRaw(wt.dir, ['diff', '--cached', wt.snapshotCommit]);
+  // --binary so binary-file changes are captured as real (appliable) patches
+  // instead of "Binary files differ" (which git apply rejects → data loss).
+  const patch = await gitRaw(wt.dir, ['diff', '--binary', '--cached', wt.snapshotCommit]);
 
   // Reset the index (best effort, never throw)
   try {
