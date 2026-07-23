@@ -1,6 +1,6 @@
 {
   "name": "cc-delegate",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "description": "Delegate bounded coding sub-tasks from Claude Code to external frontier models (Qwen, Kimi, DeepSeek, GLM) via OpenRouter, SiliconFlow, DeepInfra or Cerebras.",
   "author": {
     "name": "NightZpy"
