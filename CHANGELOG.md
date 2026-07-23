@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.2] - 2026-07-23
+
+### Changed
+- README: the jobs panel now has a proper entry under Monitoring (why it exists — delegated jobs aren't rendered like Claude Code's own subagents — plus the keys, the captured-output snapshot, and the ACTIVITY-vs-LOG caveat), not just the two table rows.
+
 ## [0.20.1] - 2026-07-23
 
 ### Changed
