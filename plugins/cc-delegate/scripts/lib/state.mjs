@@ -36,21 +36,58 @@ export async function resolveWorkspaceRoot(cwd) {
   }
 }
 
+// The plugin's own home — the SAME path whether the runtime is invoked from
+// Claude Code or from the user's terminal.
+const CC_DELEGATE_STATE_HOME = path.join(os.homedir(), ".claude", "cc-delegate", "state");
+
 export async function getWorkspaceState(cwd) {
   const workspaceRoot = await resolveWorkspaceRoot(cwd);
   const hash = crypto.createHash("sha256").update(workspaceRoot).digest("hex").slice(0, 16);
   const baseName = slugify(path.basename(workspaceRoot));
-  const stateRoots = [];
-  if (process.env.CLAUDE_PLUGIN_DATA) {
-    stateRoots.push(path.join(process.env.CLAUDE_PLUGIN_DATA, "state"));
-  }
-  stateRoots.push(path.join(os.tmpdir(), "cc-delegate-companion"));
+  const dirName = `${baseName}-${hash}`;
 
-  for (const stateRoot of stateRoots) {
-    const workspaceDir = path.join(stateRoot, `${baseName}-${hash}`);
+  // State location MUST be deterministic. It used to key off CLAUDE_PLUGIN_DATA,
+  // which is only set inside Claude Code (and points at whichever plugin's data
+  // dir) — so jobs dispatched by Claude Code landed somewhere the user's own
+  // terminal never looked, and `jobs`/`status`/`watch` showed "no jobs yet".
+  const legacyRoots = [];
+  if (process.env.CLAUDE_PLUGIN_DATA) {
+    legacyRoots.push(path.join(process.env.CLAUDE_PLUGIN_DATA, "state"));
+  }
+  legacyRoots.push(path.join(os.tmpdir(), "cc-delegate-companion"));
+
+  const candidates = [CC_DELEGATE_STATE_HOME, ...legacyRoots];
+
+  for (const stateRoot of candidates) {
+    const workspaceDir = path.join(stateRoot, dirName);
     const jobsDir = path.join(workspaceDir, "jobs");
 
     try {
+      // One-time adoption: if this workspace still lives under a legacy root,
+      // move it into the deterministic home so existing history and in-flight
+      // jobs stay visible from both contexts instead of being stranded.
+      if (stateRoot === CC_DELEGATE_STATE_HOME) {
+        let exists = true;
+        try {
+          await fs.access(workspaceDir);
+        } catch {
+          exists = false;
+        }
+        if (!exists) {
+          for (const legacyRoot of legacyRoots) {
+            const legacyDir = path.join(legacyRoot, dirName);
+            try {
+              await fs.access(legacyDir);
+              await fs.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+              await fs.rename(legacyDir, workspaceDir);
+              break;
+            } catch {
+              // not there, or not movable — fall through to a fresh dir
+            }
+          }
+        }
+      }
+
       await fs.mkdir(jobsDir, { recursive: true });
       await fs.access(workspaceDir, fsConstants.W_OK);
       return {
