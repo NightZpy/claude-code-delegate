@@ -498,12 +498,25 @@ function buildOverviewView(filtered, filterInfo, styles, quotaSection) {
 }
 
 // Builds the human-readable Details body (no trailing newline).
-function buildDetailsView(limited, styles) {
-  if (!limited.length) {
+function buildDetailsView(limited, styles, runningJobs = []) {
+  if (!limited.length && !(runningJobs && runningJobs.length)) {
     return "no usage recorded yet";
   }
 
   const headers = ["TIME", "JOB", "MODEL", "PROVIDER", "IN", "OUT", "COST", "LATENCY", "CTX%", "STATUS", "MODE"];
+  // Running jobs first (STATUS col is index 9; MODE is last). Build explicitly
+  // so the STATUS/MODE placement matches this view's columns.
+  const runningRows = (runningJobs || []).map((j) => {
+    const cells = ["-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"];
+    cells[0] = formatRelativeTime(j.startedAt);
+    cells[1] = formatJobIdShort(j.jobId);
+    cells[2] = String(j.model || "-");
+    cells[3] = String(j.provider || "-");
+    cells[7] = "running";
+    cells[9] = j.status || "running";
+    cells[10] = j.mode || "text";
+    return { cells, running: true, ctxPct: null, failed: false };
+  });
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
     const failed = entry.status !== "completed";
@@ -527,7 +540,13 @@ function buildDetailsView(limited, styles) {
   });
 
   const ctxIndex = headers.indexOf("CTX%");
-  return renderTable(headers, rows, styles, (cells, row) => {
+  const statusIndex = headers.indexOf("STATUS");
+  return renderTable(headers, [...runningRows, ...rows], styles, (cells, row) => {
+    if (row.running) {
+      const c = [...cells];
+      c[statusIndex] = styles.bold(cells[statusIndex]);
+      return c;
+    }
     if (row.failed) {
       const dimmed = cells.map((cell) => styles.dim(cell));
       dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
@@ -720,8 +739,8 @@ function buildAnalyzeView(entries, filtered, warnings, activeAdvisories, savedAn
 
 
 // buildUsageTabBody
-function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all') {
-  if (modeScope !== "all" && entries.length === 0) {
+function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, savedAnalysis, modeScope = 'all', runningJobs = []) {
+  if (modeScope !== "all" && entries.length === 0 && runningJobs.length === 0) {
     return `  ${styles.dim(`no ${modeScope} delegations yet`)}`;
   }
   if (tabIndex === 3) {
@@ -748,10 +767,13 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
         : 20;
     const sorted = [...entries].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
     const limited = sorted.slice(0, Math.max(0, limit));
+    const running = (runningJobs || []).filter((j) =>
+      modeScope === "all" ? true : (j.mode || "text") === modeScope,
+    );
     if (modeScope === "agentic") {
-      return buildAgenticDetailsView(limited, styles);
+      return buildAgenticDetailsView(limited, styles, running);
     }
-    return buildDetailsView(limited, styles);
+    return buildDetailsView(limited, styles, running);
   }
 
   const normalized = entries.map(normalizeLedgerEntry);
@@ -851,6 +873,31 @@ function buildUsageTabBody(tabIndex, entries, flags, config, styles, models, sav
 // Interactive tabbed usage viewer. Entered only when stdout/stdin are both
 // TTYs and no view flag (--details/--health/--json) or --static was passed.
 // ponytail: no scroll — content taller than the terminal is truncated with a
+// In-flight jobs for the current workspace — they live in job state, never in
+// the ledger (which only records finished jobs), so the Details tab must fetch
+// them separately or running work is invisible.
+async function loadRunningJobsForTui() {
+  try {
+    const cwd = process.cwd();
+    const summaries = (await listJobs(cwd)).filter(
+      (j) => j.status === "running" || j.status === "queued",
+    );
+    // Summaries drop `mode`/`request`; load the full job (few of them) so the
+    // mode column and text/agentic scope filter are correct.
+    const full = await Promise.all(summaries.map((s) => loadJob(cwd, s.id).catch(() => null)));
+    return full.filter(Boolean).map((j) => ({
+      jobId: j.id,
+      model: j.model,
+      provider: j.provider,
+      mode: j.mode || (j.request?.agentic ? "agentic" : "text"),
+      status: j.status,
+      startedAt: j.createdAt,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 // hint to use the static --details/--limit view instead of building a pager.
 // runUsageTui
 async function runUsageTui(flags) {
@@ -860,6 +907,7 @@ async function runUsageTui(flags) {
   const models = await readModelsRegistry();
   let entries = await readUsageLedger();
   let savedAnalysis = await readSavedAnalysis();
+  let runningJobs = await loadRunningJobsForTui();
   let activeTab = 0;
   let modeScope = "all"; // all | text | agentic
   const wasRaw = Boolean(stdin.isRaw);
@@ -886,7 +934,8 @@ async function runUsageTui(flags) {
       styles,
       models,
       savedAnalysis,
-      modeScope
+      modeScope,
+      runningJobs
     );
     const helpLine = styles.dim(
       "←/→ or 1-5 switch view · r reload · g mode (all→text→agentic) · q quit"
@@ -991,6 +1040,7 @@ async function runUsageTui(flags) {
         acted = true;
       } else if (ch === "r") {
         entries = await readUsageLedger();
+        runningJobs = await loadRunningJobsForTui();
         savedAnalysis = await readSavedAnalysis();
         acted = true;
       } else if (ch === "g") {
@@ -1179,12 +1229,21 @@ async function usageCommand(flags) {
   writeClippedToStdout(view);
 }
 
-function buildAgenticDetailsView(limited, styles) {
-  if (!limited.length) {
+function buildAgenticDetailsView(limited, styles, runningJobs = []) {
+  if (!limited.length && !(runningJobs && runningJobs.length)) {
     return "no agentic usage recorded yet";
   }
 
   const headers = ["TIME", "JOB", "MODEL", "AGENT", "IN", "REASON", "OUT", "CACHE-R", "TOOLS", "FILES", "COST", "LATENCY", "STATUS"];
+  const runningRows = (runningJobs || []).map((j) => {
+    const cells = new Array(headers.length).fill("-");
+    cells[0] = formatRelativeTime(j.startedAt);
+    cells[1] = formatJobIdShort(j.jobId);
+    cells[2] = String(j.model || "-");
+    cells[headers.length - 2] = "running";      // LATENCY
+    cells[headers.length - 1] = j.status || "running"; // STATUS
+    return { cells, running: true, ctxPct: null, failed: false };
+  });
   const rows = limited.map((raw) => {
     const entry = normalizeLedgerEntry(raw);
     const failed = entry.status !== "completed";
@@ -1216,8 +1275,12 @@ function buildAgenticDetailsView(limited, styles) {
     return row;
   });
 
-  const ctxIndex = headers.indexOf("CTX%"); // unused here but kept for compatibility; we ignore context% in this view.
-  return renderTable(headers, rows, styles, (cells, row) => {
+  return renderTable(headers, [...runningRows, ...rows], styles, (cells, row) => {
+    if (row.running) {
+      const c = [...cells];
+      c[c.length - 1] = styles.bold(cells[cells.length - 1]);
+      return c;
+    }
     if (row.failed) {
       const dimmed = cells.map((cell) => styles.dim(cell));
       dimmed[dimmed.length - 1] = styles.red(cells[cells.length - 1]);
