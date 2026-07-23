@@ -115,6 +115,7 @@ When you'd otherwise hand-orchestrate several bounded tasks (decompose, dispatch
 After you dispatch, you MUST look at the outcome before doing anything else — especially for `--background` jobs. Don't assume success.
 - Foreground: read the returned output/error immediately.
 - Background: collect with `/cc-delegate:status` then `/cc-delegate:result <id>` (or `cc-delegate watch <id>` for live activity). Don't move on or report "done" until you've confirmed each job actually completed.
+- **Check progress with `/cc-delegate:jobs`** — one snapshot of every job PLUS the live log/activity of each running one, so you can see what an in-flight delegation is doing without polling several commands. **The user cannot see your delegated jobs** (they run through Bash, so nothing renders the way Claude Code's own subagents do). When a job will run for a while, tell them they can run **`cc-delegate jobs` in their own terminal** for an interactive panel: ↑/↓ to select a job, enter to open it and watch it live, `q` to quit.
 - On a **failed** job: read the error AND any `⚡` advisory, then act — re-dispatch on the healthy route (`--provider …` / a different `--model`), don't silently retry the same broken route or quietly redo the work yourself.
 - Separately dispatched agentic jobs are **serialized** (they share one run slot) — launching several at once is fine, they queue; just remember to collect all of them. If you want real concurrency, use `orchestrate`, which fans its workers out in parallel inside one held slot.
 
