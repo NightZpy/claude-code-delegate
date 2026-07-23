@@ -21,6 +21,7 @@ import {
 import { loadConfig, saveConfig } from "./lib/config.mjs";
 import { runTrackedJob, spawnBackgroundWorker, appendUsageLedger } from "./lib/jobs.mjs";
 import { runAgenticWorkersParallel } from "./lib/agentic-parallel.mjs";
+import { diffOfFiles, reconcileClaims } from "./lib/write-verify.mjs";
 import {
   checkServerHealth,
   ensureLeanAgents,
@@ -2143,10 +2144,34 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
 
   let touchedFiles = [];
   let content = text;
+  let appliedPatch = null;
   if (agent === "cc-build") {
     touchedFiles = (await listTouchedFiles(job.cwd)).filter((f) => !baselineDirty.has(f));
-    content = `${text}\n\ntouched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`;
-    await tools.log(`touched files: ${touchedFiles.length ? touchedFiles.join(", ") : "none"}`);
+
+    // TRUST GATE 1 — no-op write. --write was requested but nothing changed on
+    // disk. This is the "model returned replacement code in its message instead
+    // of applying it" failure mode; reporting it as success is the most
+    // dangerous outcome (an orchestrator would merge code that doesn't exist).
+    if (touchedFiles.length === 0) {
+      throw new Error(
+        `NO-OP WRITE: --write was requested but no file changed on disk (${toolCalls} tool call(s) in the run). ` +
+          `The model most likely returned replacement code in its message instead of applying it. ` +
+          `Treated as failed — do NOT trust the report. Retry (consider --isolate, or a different model).`,
+      );
+    }
+
+    // TRUST GATE 2 — ground the report in the REAL diff, and flag any file the
+    // prose claims to have edited that has no corresponding change on disk.
+    appliedPatch = await diffOfFiles(job.cwd, touchedFiles);
+    const { notApplied } = reconcileClaims(text, touchedFiles);
+    const warnLine = notApplied.length
+      ? `\n\n⚠ CLAIMED-BUT-NOT-APPLIED: the report mentions ${notApplied.join(", ")} but no change to ${notApplied.length > 1 ? "those files" : "that file"} is present in the diff — VERIFY before trusting this result.`
+      : "";
+    content = `${text}\n\napplied (real diff) — files changed: ${touchedFiles.join(", ")}${warnLine}`;
+    await tools.log(
+      `applied files: ${touchedFiles.join(", ")}` +
+        (notApplied.length ? ` | ⚠ claimed-but-not-applied: ${notApplied.join(", ")}` : ""),
+    );
   }
 
   try {
@@ -2181,6 +2206,9 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
       alias: selection.alias,
       provider: providerID || candidate.name,
       touchedFiles,
+      // The REAL diff of what this run wrote — the report is grounded in this,
+      // not in the model's prose.
+      appliedPatch,
     },
   };
 }
