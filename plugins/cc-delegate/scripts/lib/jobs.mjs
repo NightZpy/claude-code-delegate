@@ -59,6 +59,9 @@ async function appendUsageLedger(job) {
     // Additive: only present when the provider returned an id (absent on
     // no-response timeouts, where provider+ts still allow manual cross-check).
     ...(providerRequestId ? { providerRequestId } : {}),
+    // Failed rows that reached a provider may have billed anyway — flag them so
+    // reconciliation treats the spend as unconfirmed rather than assuming $0.
+    ...(!isCompleted ? { unconfirmed: true } : {}),
     // Additive: agentic rows carry mode:"agentic"; text-mode rows (and all
     // historical rows) have no field at all, which readers treat as "text".
     ...(job.mode ? { mode: job.mode } : {}),

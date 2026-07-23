@@ -1860,6 +1860,12 @@ async function executeTaskRequest(job, models, request, tools) {
       attempt.outcome = "error";
       attempt.error = error.message || String(error);
       attempt.finishedAt = new Date().toISOString();
+      // If the provider returned a request id before failing, keep it — the call
+      // may have billed, and the id makes the failed row reconcilable.
+      if (error.providerRequestId) {
+        attempt.providerRequestId = error.providerRequestId;
+        await tools.setJob({ providerRequestId: error.providerRequestId });
+      }
       await tools.log(`provider ${candidate.name} failed: ${attempt.error}`);
       await tools.setJob({ attempts });
     }
@@ -3430,6 +3436,104 @@ async function execFileAsyncOrThrow(cwd) {
   if (stdout.trim() !== "true") throw new Error("not a git work tree");
 }
 
+const RECONCILE_HELP = `cc-delegate reconcile — cross-check our ledger against OpenRouter's own spend
+
+Usage:
+  cc-delegate reconcile [--set-baseline] [--json]
+
+OpenRouter's /credits reports cumulative account usage; we diff spend-since-baseline
+against our ledger so orphaned spend (failed/aborted calls that billed but we didn't
+record) surfaces as a positive delta. Also lists 'unconfirmed' rows — calls that
+reached a provider and failed, which MAY have billed — with their request ids so you
+can cross-check them in OpenRouter's Activity log.
+
+Flags:
+  --set-baseline   record the current OpenRouter usage + ledger total as the zero point
+  --json           machine-readable output`;
+
+// Reconcile our ledger against OpenRouter's own cumulative spend. The analytics
+// per-window endpoint isn't available to inference keys (404), so we use
+// /credits (cumulative usage) with a stored baseline to compute a since-baseline
+// delta. ponytail: OpenRouter only; SiliconFlow exposes balance, not cumulative usage.
+async function reconcileCommand(flags) {
+  if (flags.help) {
+    process.stdout.write(`${RECONCILE_HELP}\n`);
+    return 0;
+  }
+  const entries = await readUsageLedger();
+  const ledgerTotal = entries.reduce((s, e) => s + Number(e.cost || 0), 0);
+  const unconfirmed = entries.filter((e) => e.unconfirmed);
+  const keys = (await loadKeys()).values;
+  const cred = await fetchOpenRouterCredits(keys.OPENROUTER_API_KEY).catch(() => null);
+  const baselineFile = path.join(CC_DELEGATE_HOME, "reconcile-baseline.json");
+
+  if (flags["set-baseline"]) {
+    if (!cred) {
+      process.stderr.write("cannot set baseline: OpenRouter credits unavailable (no key or API error).\n");
+      return 1;
+    }
+    const baseline = { ts: new Date().toISOString(), orUsage: cred.usage, ledgerTotal };
+    await fs.writeFile(baselineFile, JSON.stringify(baseline, null, 2), "utf8");
+    process.stdout.write(`baseline set: OpenRouter usage $${cred.usage.toFixed(4)}, ledger $${ledgerTotal.toFixed(4)} @ ${baseline.ts}\n`);
+    return 0;
+  }
+
+  let baseline = null;
+  try { baseline = JSON.parse(await fs.readFile(baselineFile, "utf8")); } catch {}
+
+  const report = {
+    ledgerTotalUsd: Number(ledgerTotal.toFixed(6)),
+    unconfirmedCount: unconfirmed.length,
+    openrouter: cred ? { cumulativeUsageUsd: cred.usage, remainingUsd: cred.remaining } : null,
+    baseline,
+    sinceBaseline: null,
+  };
+  if (baseline && cred) {
+    const orDelta = cred.usage - baseline.orUsage;
+    const ledgerDelta = ledgerTotal - baseline.ledgerTotal;
+    report.sinceBaseline = {
+      openrouterDeltaUsd: Number(orDelta.toFixed(6)),
+      ledgerDeltaUsd: Number(ledgerDelta.toFixed(6)),
+      unreconciledUsd: Number((orDelta - ledgerDelta).toFixed(6)),
+    };
+  }
+
+  if (flags.json) {
+    printJson(report);
+    return 0;
+  }
+
+  const L = [];
+  L.push(`ledger recorded spend: $${ledgerTotal.toFixed(6)} over ${entries.length} rows`);
+  if (cred) {
+    L.push(`OpenRouter cumulative usage: $${cred.usage.toFixed(4)}  ·  remaining credit: $${cred.remaining.toFixed(4)}`);
+  } else {
+    L.push("OpenRouter usage: unavailable (no key or API error)");
+  }
+  if (report.sinceBaseline) {
+    const s = report.sinceBaseline;
+    L.push("");
+    L.push(`since baseline (${baseline.ts}):`);
+    L.push(`  OpenRouter +$${s.openrouterDeltaUsd.toFixed(6)}  ·  ledger +$${s.ledgerDeltaUsd.toFixed(6)}  ·  unreconciled +$${s.unreconciledUsd.toFixed(6)}`);
+    if (s.unreconciledUsd > 0.0005) {
+      L.push(`  ⚠ $${s.unreconciledUsd.toFixed(6)} of OpenRouter spend is not in our ledger — likely failed/aborted calls that billed. Check the unconfirmed rows below and OpenRouter Activity.`);
+    }
+  } else {
+    L.push("");
+    L.push("no baseline yet — run `cc-delegate reconcile --set-baseline` to start tracking the delta (a raw diff would include pre-ledger history and other apps on this key).");
+  }
+  if (unconfirmed.length) {
+    L.push("");
+    L.push(`unconfirmed rows (reached a provider, then failed — MAY have billed): ${unconfirmed.length}`);
+    for (const e of unconfirmed.slice(-10)) {
+      L.push(`  ${e.ts}  ${e.model || "-"} via ${e.provider || "-"}  id=${e.providerRequestId || "(none)"}`);
+    }
+    L.push("  → cross-check these ids/timestamps in OpenRouter's Activity log.");
+  }
+  process.stdout.write(`${L.join("\n")}\n`);
+  return 0;
+}
+
 // Inspect or clear the agentic run slot. Agentic jobs serialize on a single
 // lock; a crashed holder is now reclaimed by liveness automatically, but this
 // gives an operator a way to see/force-clear a wedged slot.
@@ -3475,7 +3579,7 @@ async function main() {
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, watch, uninstall, link",
     );
   }
 
@@ -3492,6 +3596,8 @@ async function main() {
       return orchestrateCommand(cwd, flags, positionals);
     case "slot":
       return slotCommand(flags);
+    case "reconcile":
+      return reconcileCommand(flags);
     case "task-worker":
       return taskWorkerCommand(cwd, flags);
     case "status":

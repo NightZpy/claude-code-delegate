@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-07-23
+
+### Added
+- **Cost reconciliation to catch orphaned spend.** `cc-delegate reconcile` cross-checks our ledger against OpenRouter's own cumulative usage (`/credits`); with `--set-baseline` it tracks the since-baseline delta so spend OpenRouter billed but we didn't record surfaces as a positive "unreconciled" amount. (OpenRouter's per-window analytics endpoint 404s for inference keys, so the baseline-delta approach is used instead.)
+- Text-mode calls now capture OpenRouter's `X-Generation-Id` **response header** (present even on error responses, and more reliable than the body `id`). A call that reached a provider and then FAILED now records its request id and is flagged `unconfirmed: true` in the ledger — a failed-but-maybe-billed call no longer orphans its spend. `reconcile` lists these rows with ids/timestamps for manual cross-check against OpenRouter's Activity log.
+
+### Note
+- Per-sub-call id capture for agentic runs, and the OpenCode-native parallel orchestrator, are the next planned steps.
+
 ## [0.16.2] - 2026-07-23
 
 ### Fixed
