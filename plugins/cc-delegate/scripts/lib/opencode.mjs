@@ -388,8 +388,12 @@ export async function ocFetch(server, method, requestPath, body, opts = {}) {
   return response.json();
 }
 
-export async function createSession(server) {
-  return ocFetch(server, "POST", "/session", {});
+// Optionally pin the session to a specific directory (a git worktree) so its
+// tools read/write there — this is what lets N sessions on ONE server run
+// against N isolated worktrees concurrently, no per-session server needed.
+export async function createSession(server, { directory } = {}) {
+  const requestPath = directory ? `/session?directory=${encodeURIComponent(directory)}` : "/session";
+  return ocFetch(server, "POST", requestPath, {});
 }
 
 export async function httpRequestJson({

@@ -19,7 +19,8 @@ import {
   maskKey,
 } from "./lib/env.mjs";
 import { loadConfig, saveConfig } from "./lib/config.mjs";
-import { runTrackedJob, spawnBackgroundWorker } from "./lib/jobs.mjs";
+import { runTrackedJob, spawnBackgroundWorker, appendUsageLedger } from "./lib/jobs.mjs";
+import { runAgenticWorkersParallel } from "./lib/agentic-parallel.mjs";
 import {
   checkServerHealth,
   ensureLeanAgents,
@@ -3289,15 +3290,17 @@ Usage:
   cc-delegate orchestrate [flags] --tasks tasks.json
 
 The orchestrator model plans/decomposes and reviews; each task runs on a worker
-model in its OWN git worktree (isolated), is reviewed, and only clean+passing
-patches are merged back. Conflicts/failures/flags are returned for you to handle.
-It NEVER self-approves — you are the final verifier.
+model in its OWN git worktree, IN PARALLEL (each an isolated OpenCode session on
+the one shared server). Results are reviewed and only clean+passing patches are
+merged back. Conflicts/failures/flags are returned for you to handle. It NEVER
+self-approves — you are the final verifier.
 
 Flags:
   --orchestrator-model <alias>  planner + reviewer (default kimi-fast)
   --worker-model <alias>        default executor per task (default deepseek-pro)
   --tasks <path>                JSON array [{title, brief, model?}]; else decompose the brief
   --max <n>                     cap number of tasks (default 8)
+  --sequential                  run workers one-at-a-time instead of in parallel
   --json                        print the full report as JSON
   --prompt-file <path>          read the brief from a file
 
@@ -3391,14 +3394,101 @@ async function orchestrateCommand(cwd, flags, positionals) {
   };
 
   process.stderr.write(`orchestrating with ${orchestratorModel} (plan+review), workers default ${workerModel}…\n`);
+
+  // Resolve the task list up front (decompose the brief if needed) so workers can
+  // be pre-run in PARALLEL — each in its own OpenCode session pinned to its own
+  // worktree, all on the one shared server. ponytail: --sequential falls back to
+  // the one-at-a-time path (the pre-parallel behavior) if ever needed.
+  let resolvedTasks = tasks;
+  let planCostUsd = 0;
+  if (!resolvedTasks) {
+    const plan = await deps.planTasks(brief, orchestratorModel);
+    resolvedTasks = plan.tasks;
+    planCostUsd = plan.costUsd || 0;
+  }
+  const models = await readModelsRegistry();
+  resolvedTasks = resolvedTasks.slice(0, maxTasks).map((t, i) => ({
+    ...t,
+    id: t.id || `task-${i + 1}`,
+    title: t.title || String(t.brief || "").slice(0, 60),
+    model: t.model || workerModel,
+  }));
+
+  let runWorkerDep = deps.runWorker; // sequential default (used with --sequential)
+  if (!flags.sequential) {
+    // Map each task to a concrete provider/model and one shared parallel run.
+    const workerTasks = resolvedTasks.map((t) => {
+      const sel = resolveModelSelection(models, t.model, null);
+      const usable = sel.providers.filter((p) => {
+        const cfg = PROVIDERS[p.name];
+        return !cfg?.envKey || process.env[cfg.envKey];
+      });
+      const p = usable[0] || sel.providers[0];
+      return { id: t.id, title: t.title, brief: t.brief, model: { providerID: p.name, modelID: p.id }, timeoutMs: sel.timeoutMs || 900000 };
+    });
+
+    const wrote = await ensureLeanAgents();
+    if (wrote) { try { await stopServer(CC_DELEGATE_HOME); } catch {} }
+    // Hold the agentic slot ONCE for the whole fan-out (so an external agentic
+    // job doesn't fight the shared server); workers run concurrently within it.
+    const release = await acquireAgenticSlot(CC_DELEGATE_HOME, { jobId: "orchestrate" });
+    let results;
+    try {
+      process.stderr.write(`running ${workerTasks.length} workers in parallel (isolated OpenCode sessions)…\n`);
+      results = await runAgenticWorkersParallel({
+        tasks: workerTasks,
+        repoDir: cwd,
+        deps: {
+          ensureServer,
+          stateDir: CC_DELEGATE_HOME,
+          createSession,
+          sendMessage,
+          extractText,
+          listMessages,
+          sumSessionUsage,
+          createIsolatedWorktree,
+          captureJobPatch,
+          log: (m) => process.stderr.write(`${m}\n`),
+        },
+      });
+    } finally {
+      await release();
+    }
+
+    // Record each worker in the ledger (accurate cost) and build the lookup the
+    // sequential review+merge loop consumes.
+    const lookup = {};
+    for (const r of results) {
+      const wt = workerTasks.find((x) => x.id === r.id);
+      const t = resolvedTasks.find((x) => x.id === r.id);
+      await appendUsageLedger({
+        id: r.id,
+        status: r.ok ? "completed" : "failed",
+        workspaceRoot: cwd,
+        cwd,
+        model: t.model,
+        provider: wt.model.providerID,
+        result: { alias: t.model, provider: wt.model.providerID, modelId: wt.model.modelID },
+        cost: r.cost,
+        usage: { prompt_tokens: r.usage.input, completion_tokens: r.usage.output + r.usage.reasoning },
+        latencyMs: null,
+        mode: "agentic",
+        attempts: [{ provider: wt.model.providerID, outcome: r.ok ? "success" : "error" }],
+      }).catch(() => {});
+      lookup[r.id] = { ok: r.ok, patch: r.patch, evidence: r.evidence, costUsd: r.cost };
+    }
+    runWorkerDep = async (task) => lookup[task.id] || { ok: false, patch: "", evidence: "no parallel result", costUsd: 0 };
+  }
+
   const report = await runOrchestration({
-    tasks,
-    brief,
+    tasks: resolvedTasks,
     repoDir: cwd,
     workerModel,
     orchestratorModel,
-    deps,
+    deps: { ...deps, runWorker: runWorkerDep },
   });
+  report.cost.orchestratorUsd = Number((report.cost.orchestratorUsd + planCostUsd).toFixed(6));
+  report.cost.totalUsd = Number((report.cost.totalUsd + planCostUsd).toFixed(6));
 
   if (flags.json) {
     printJson(report);
