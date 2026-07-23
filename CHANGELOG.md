@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-07-23
+
+### Added
+- Ledger rows now record the provider-side request id (`providerRequestId`) for text-mode calls — OpenRouter `gen-…`, SiliconFlow `chatcmpl-…` — so a billed call can be reconciled against the provider's own activity/billing log instead of orphaning our cost tracking. Absent on no-response timeouts (no id exists), where provider + timestamp still allow a manual cross-check; agentic-mode capture is a follow-up.
+
 ## [0.16.0] - 2026-07-23
 
 ### Added

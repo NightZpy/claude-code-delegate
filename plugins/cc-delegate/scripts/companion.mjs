@@ -1844,6 +1844,8 @@ async function executeTaskRequest(job, models, request, tools) {
         ctxPct: contextGuard.ctxPct,
         contextAdvisory: contextGuard.advisoryLine,
         conversation,
+        // Provider-side id for ledger reconciliation (OpenRouter gen-…, etc.).
+        providerRequestId: response.id || null,
         result: {
           content,
           raw: response,
