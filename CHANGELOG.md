@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-07-23
+
+### Fixed
+- **Agentic `--write` jobs no longer report edits that were never written.** The report is now grounded in the real git diff instead of the model's prose:
+  - **NO-OP WRITE is a failure.** If `--write` was requested and *nothing changed on disk*, the job fails with an explicit `NO-OP WRITE` error instead of reporting success. This catches the "model returned replacement code in its message instead of applying it" mode (observed with deepseek-pro agentic).
+  - **Claimed-but-not-applied warning.** Files the report claims to have edited that have no corresponding change on disk are flagged with a `⚠ CLAIMED-BUT-NOT-APPLIED` line in the result — catches partial application (observed with kimi/grok skipping some of the requested edits while reporting all done).
+  - The result now carries `appliedPatch`: the real `git diff` of the files this run actually changed, so an orchestrator never has to reverse-engineer what landed.
+
+### Added
+- `lib/write-verify.mjs` (self-tested): `extractClaimedFiles`, `reconcileClaims` (suffix-tolerant both ways), `diffOfFiles` (read-only, never mutates the index).
+
 ## [0.18.0] - 2026-07-23
 
 ### Changed
