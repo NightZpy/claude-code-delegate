@@ -24,6 +24,7 @@ import {
   checkServerHealth,
   ensureLeanAgents,
   acquireAgenticSlot,
+  readAgenticSlotHolder,
   listMessages,
   summarizeActivity,
   sumSessionUsage,
@@ -1960,7 +1961,13 @@ async function executeAgenticTaskRequest(job, models, request, tools) {
   }
 
   const releaseSlot = await acquireAgenticSlot(CC_DELEGATE_HOME, {
-    onWait: () => tools.log("waiting for the agentic slot (another agentic job is running)…"),
+    jobId: job.id,
+    onWait: (holder) =>
+      tools.log(
+        holder && Number.isInteger(holder.pid)
+          ? `waiting for the agentic slot — held by pid ${holder.pid}${holder.jobId ? ` (job ${holder.jobId})` : ""}${holder.alive ? "" : " [holder dead — reclaiming]"}…`
+          : "waiting for the agentic slot (another agentic job is running)…",
+      ),
   });
 
   let latencyMs;
@@ -2762,6 +2769,15 @@ async function statusCommand(cwd, flags, positionals) {
   }
 
   lines.push(`running: ${payload.runningJobs.length}`);
+  // Surface the agentic slot holder — a wedged slot used to be invisible.
+  const slot = await readAgenticSlotHolder(CC_DELEGATE_HOME);
+  if (slot && Number.isInteger(slot.pid)) {
+    lines.push(
+      slot.alive
+        ? `agentic slot: held by pid ${slot.pid}${slot.jobId ? ` (job ${slot.jobId})` : ""}`
+        : `agentic slot: STALE — held by dead pid ${slot.pid} (reclaimed on next agentic run; clear now: cc-delegate slot --release)`,
+    );
+  }
   if (payload.latestFinished) {
     lines.push(
       `latest finished: ${payload.latestFinished.id} ${payload.latestFinished.status}`,
@@ -3414,12 +3430,52 @@ async function execFileAsyncOrThrow(cwd) {
   if (stdout.trim() !== "true") throw new Error("not a git work tree");
 }
 
+// Inspect or clear the agentic run slot. Agentic jobs serialize on a single
+// lock; a crashed holder is now reclaimed by liveness automatically, but this
+// gives an operator a way to see/force-clear a wedged slot.
+async function slotCommand(flags) {
+  const lockFile = path.join(CC_DELEGATE_HOME, "agentic-run.lock");
+  const holder = await readAgenticSlotHolder(CC_DELEGATE_HOME);
+
+  if (flags.release) {
+    if (!holder) {
+      process.stdout.write("agentic slot already free — nothing to release.\n");
+      return 0;
+    }
+    if (holder.alive && !flags.force) {
+      process.stderr.write(
+        `refusing to release: the holder (pid ${holder.pid}${holder.jobId ? `, job ${holder.jobId}` : ""}) is still ALIVE. ` +
+          `Cancel that job, or pass --force to release anyway.\n`,
+      );
+      return 1;
+    }
+    await fs.rm(lockFile, { force: true });
+    process.stdout.write(`released the agentic slot (was held by pid ${holder.pid}${holder.alive ? " — forced" : " — holder was dead"}).\n`);
+    return 0;
+  }
+
+  if (flags.json) {
+    printJson({ held: Boolean(holder), holder });
+    return 0;
+  }
+  if (!holder) {
+    process.stdout.write("agentic slot: free\n");
+    return 0;
+  }
+  process.stdout.write(
+    `agentic slot: HELD by pid ${holder.pid}${holder.jobId ? ` (job ${holder.jobId})` : ""}` +
+      `${holder.startedAt ? ` since ${holder.startedAt}` : ""} — holder ${holder.alive ? "alive" : "DEAD (will be reclaimed on next acquire)"}\n` +
+      (holder.alive ? "" : "clear it now with: cc-delegate slot --release\n"),
+  );
+  return 0;
+}
+
 async function main() {
   const { command, cwd, flags, positionals } = parseArgs();
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, usage, analysis, review, adversarial-review, gate, opencode, slot, watch, uninstall, link",
     );
   }
 
@@ -3434,6 +3490,8 @@ async function main() {
       return taskCommand(cwd, flags, positionals);
     case "orchestrate":
       return orchestrateCommand(cwd, flags, positionals);
+    case "slot":
+      return slotCommand(flags);
     case "task-worker":
       return taskWorkerCommand(cwd, flags);
     case "status":
