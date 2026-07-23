@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1] - 2026-07-23
+
+### Changed
+- `using-cc-delegate` skill now tells agents about `/cc-delegate:jobs` (one snapshot of every job plus the live detail of each running one) and, importantly, that the **user cannot see delegated jobs** — so the agent should point them at `cc-delegate jobs` in their own terminal for the interactive panel when a delegation will run for a while.
+
 ## [0.20.0] - 2026-07-23
 
 ### Added
