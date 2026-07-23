@@ -3407,12 +3407,20 @@ async function orchestrateCommand(cwd, flags, positionals) {
     planCostUsd = plan.costUsd || 0;
   }
   const models = await readModelsRegistry();
-  resolvedTasks = resolvedTasks.slice(0, maxTasks).map((t, i) => ({
-    ...t,
-    id: t.id || `task-${i + 1}`,
-    title: t.title || String(t.brief || "").slice(0, 60),
-    model: t.model || workerModel,
-  }));
+  // Unique ids — the parallel results are keyed by id and looked up per task
+  // during review/merge; a duplicate id would merge the wrong patch and drop work.
+  const seenIds = new Set();
+  resolvedTasks = resolvedTasks.slice(0, maxTasks).map((t, i) => {
+    let id = t.id || `task-${i + 1}`;
+    while (seenIds.has(id)) id = `${id}-${i + 1}`;
+    seenIds.add(id);
+    return {
+      ...t,
+      id,
+      title: t.title || String(t.brief || "").slice(0, 60),
+      model: t.model || workerModel,
+    };
+  });
 
   let runWorkerDep = deps.runWorker; // sequential default (used with --sequential)
   if (!flags.sequential) {
@@ -3424,16 +3432,19 @@ async function orchestrateCommand(cwd, flags, positionals) {
         return !cfg?.envKey || process.env[cfg.envKey];
       });
       const p = usable[0] || sel.providers[0];
+      if (!p) throw new Error(`orchestrate: no usable provider for model "${t.model}" (task ${t.id})`);
       return { id: t.id, title: t.title, brief: t.brief, model: { providerID: p.name, modelID: p.id }, timeoutMs: sel.timeoutMs || 900000 };
     });
 
-    const wrote = await ensureLeanAgents();
-    if (wrote) { try { await stopServer(CC_DELEGATE_HOME); } catch {} }
     // Hold the agentic slot ONCE for the whole fan-out (so an external agentic
     // job doesn't fight the shared server); workers run concurrently within it.
+    // ensureLeanAgents/stopServer live INSIDE the slot — stopping the server is
+    // the most destructive op and must not run while another job holds the slot.
     const release = await acquireAgenticSlot(CC_DELEGATE_HOME, { jobId: "orchestrate" });
     let results;
     try {
+      const wrote = await ensureLeanAgents();
+      if (wrote) { try { await stopServer(CC_DELEGATE_HOME); } catch {} }
       process.stderr.write(`running ${workerTasks.length} workers in parallel (isolated OpenCode sessions)…\n`);
       results = await runAgenticWorkersParallel({
         tasks: workerTasks,

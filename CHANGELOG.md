@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `lib/agentic-parallel.mjs` (dependency-injected, self-tested) — the concurrent worker engine: one shared server, one session+worktree per task, all cleaned up.
 
+### Fixed
+- Boolean flags `--isolate`, `--sequential`, `--set-baseline`, `--release`, `--force` were not registered as booleans, so when one was written immediately before a positional (e.g. `--isolate "brief"`) it swallowed the brief as its value. All now parse correctly.
+- Review-hardening of the parallel path: `stopServer`/`ensureLeanAgents` now run *inside* the held agentic slot (never kill a server an external job is using); duplicate/missing task ids are made unique (a collision would have merged the wrong patch); a task whose model resolves to no provider fails with a clear error.
+
 ## [0.17.1] - 2026-07-23
 
 ### Changed
