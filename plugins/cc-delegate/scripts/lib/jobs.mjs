@@ -12,7 +12,7 @@ function errorMessage(error) {
   return error.message || String(error);
 }
 
-async function appendUsageLedger(job) {
+export async function appendUsageLedger(job) {
   const promptTokens = Number(job?.usage?.prompt_tokens || 0);
   const completionTokens = Number(job?.usage?.completion_tokens || 0);
   const isCompleted = job.status === "completed";

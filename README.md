@@ -133,7 +133,7 @@ cc-delegate orchestrate --orchestrator-model kimi-fast --worker-model deepseek-p
 cc-delegate orchestrate --tasks tasks.json     # [{ "title": "...", "brief": "...", "model": "qwen" }]
 ```
 
-Workers run **sequentially** (one isolated worktree at a time — the safe v1; parallel per‑worker servers are a documented follow‑up). You remain the final verifier: merged patches are in your tree for review, flagged ones are not.
+Workers run **in parallel** — each task is an isolated OpenCode session pinned to its own git worktree (`?directory=`), all on the one shared server, so N workers execute concurrently without corrupting each other. Review and merge‑back happen sequentially afterward. `--sequential` forces one‑at‑a‑time if needed. You remain the final verifier: merged patches are in your tree for review, flagged ones are not.
 
 Resume reuses the native OpenCode session, retaining full tool‑call history. Manage the OpenCode backend directly:
 

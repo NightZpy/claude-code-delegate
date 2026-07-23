@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-07-23
+
+### Changed
+- **`orchestrate` now runs workers in PARALLEL, natively on OpenCode.** Each task is an isolated OpenCode session pinned to its own git worktree via the server's `?directory=` param (verified empirically: writes land in the session's directory), so N workers execute concurrently on the one shared server — no per-worker server/port, no `process.chdir`. Review and merge-back stay sequential. `--sequential` forces the old one-at-a-time path. This replaces the sequential-with-server-recycle design; the whole-run global lock is now held once around the fan-out instead of per worker.
+- Each parallel worker is recorded in the usage ledger (accurate per-worker cost/tokens); the orchestrator-vs-worker cost split includes the plan call.
+
+### Added
+- `lib/agentic-parallel.mjs` (dependency-injected, self-tested) — the concurrent worker engine: one shared server, one session+worktree per task, all cleaned up.
+
+### Fixed
+- Boolean flags `--isolate`, `--sequential`, `--set-baseline`, `--release`, `--force` were not registered as booleans, so when one was written immediately before a positional (e.g. `--isolate "brief"`) it swallowed the brief as its value. All now parse correctly.
+- Review-hardening of the parallel path: `stopServer`/`ensureLeanAgents` now run *inside* the held agentic slot (never kill a server an external job is using); duplicate/missing task ids are made unique (a collision would have merged the wrong patch); a task whose model resolves to no provider fails with a clear error.
+
 ## [0.17.1] - 2026-07-23
 
 ### Changed
