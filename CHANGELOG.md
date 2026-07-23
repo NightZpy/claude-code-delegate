@@ -5,6 +5,11 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1] - 2026-07-23
+
+### Changed
+- `using-cc-delegate` skill corrected: it still said orchestrate workers run sequentially (stale since 0.18.0) — they run in parallel, one OpenCode session + worktree each, with `--sequential` as the opt-out. Also clarified that separately dispatched agentic jobs still serialize on the run slot, while `orchestrate` parallelizes inside one held slot.
+
 ## [0.19.0] - 2026-07-23
 
 ### Fixed
