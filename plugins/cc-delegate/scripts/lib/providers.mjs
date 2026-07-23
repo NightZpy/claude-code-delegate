@@ -158,17 +158,29 @@ export async function callProvider(providerName, modelId, messages, opts = {}) {
       }),
     });
 
+    // OpenRouter returns the generation id in this header — present even on
+    // error responses and even if body parsing fails; it reconciles against the
+    // account activity/billing log. Prefer it over the body `id`.
+    const genId = response.headers.get("x-generation-id") || null;
+
     if (!response.ok) {
       const text = await response.text();
       const snippet = text.slice(0, 400).replace(/\s+/g, " ").trim();
-      throw new Error(`HTTP ${response.status} from ${providerName}: ${snippet}`);
+      const err = new Error(`HTTP ${response.status} from ${providerName}: ${snippet}`);
+      // Carry the id so a failed-but-maybe-billed call still records something
+      // reconcilable instead of orphaning the spend.
+      err.providerRequestId = genId;
+      throw err;
     }
 
     // SiliconFlow's edge hangs/504s on long non-streamed outputs (reproduced
     // on deepseek/kimi); streaming and accumulating avoids that entirely.
-    return await readSseStream(response, providerName);
+    const result = await readSseStream(response, providerName);
+    return { ...result, id: genId || result.id };
   } catch (error) {
-    throw new Error(toErrorMessage(error));
+    const wrapped = new Error(toErrorMessage(error));
+    if (error && error.providerRequestId) wrapped.providerRequestId = error.providerRequestId;
+    throw wrapped;
   } finally {
     clearTimeout(timeout);
   }
