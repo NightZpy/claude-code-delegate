@@ -56,6 +56,11 @@ import {
   findLatestFinishedJob,
   listJobs,
   loadJob,
+  loadJobAnywhere,
+  listRunningJobsAnywhere,
+  listStaleJobsAnywhere,
+  reapJobAtPath,
+  scanAndClassifyAllWorkspaces,
   readJobLogTail,
   jobLogFilePath,
   updateJob,
@@ -1233,8 +1238,14 @@ async function usageCommand(flags) {
 
   const styles = usageStyles();
   const quotaSection = buildQuotaSection(config, entries, styles);
+  const { running: runningJobs, stale: staleJobs } = await scanAndClassifyAllWorkspaces();
+  const runningCount = runningJobs.length;
+  const runningLine = `running: ${runningCount}\n`;
+  const staleLine = staleJobs.length > 0
+    ? `stale: ${staleJobs.length} (dead pid / abandoned — reap: cc-delegate reap)\n`
+    : "";
   const view = buildOverviewView(filtered, { since, sessionFilter, days }, styles, quotaSection);
-  writeClippedToStdout(view);
+  writeClippedToStdout(runningLine + staleLine + view);
 }
 
 function buildAgenticDetailsView(limited, styles, runningJobs = []) {
@@ -1311,16 +1322,35 @@ async function usageDetailsCommand(flags) {
   const sorted = [...filtered].sort((left, right) => Date.parse(right.ts) - Date.parse(left.ts));
   const limited = sorted.slice(0, Math.max(0, limit));
 
+  const { running: runningJobs, stale: staleList } = await scanAndClassifyAllWorkspaces();
+  const inFlight = runningJobs.map((j) => ({
+    jobId: j.id,
+    model: j.model || null,
+    provider: j.provider || null,
+    mode: j.mode || "text",
+    status: j.status,
+    elapsedMs: j.elapsedMs,
+    startedAt: j.createdAt,
+  }));
+
   if (flags.json) {
-    printJson(limited);
+    const stale = staleList.map((s) => ({
+      jobId: s.id,
+      status: s.status,
+      pid: s.pid,
+      ageMs: s.ageMs,
+      model: s.model,
+      mode: s.mode,
+    }));
+    printJson({ entries: limited, inFlight, stale });
     return;
   }
 
   const styles = usageStyles();
   if (flags.mode === "agentic") {
-    writeClippedToStdout(buildAgenticDetailsView(limited, styles));
+    writeClippedToStdout(buildAgenticDetailsView(limited, styles, inFlight));
   } else {
-    writeClippedToStdout(buildDetailsView(limited, styles));
+    writeClippedToStdout(buildDetailsView(limited, styles, inFlight));
   }
 }
 
@@ -2318,11 +2348,26 @@ function summarizeJobForOutput(job, progressPreview) {
 
 async function buildStatusPayload(cwd, jobId, all = false) {
   if (jobId) {
-    const job = await findJob(cwd, jobId);
+    let job = await findJob(cwd, jobId);
+    let progressPreview;
     if (!job) {
-      throw new Error(`job ${jobId} not found`);
+      // Cross-workspace fallback
+      const resolved = await loadJobAnywhere(cwd, jobId);
+      if (!resolved) {
+        throw new Error(`job ${jobId} not found`);
+      }
+      job = resolved.job;
+      // Read log tail from the resolved jobsDir
+      const logPath = path.join(resolved.jobsDir, `${jobId}.log`);
+      try {
+        const text = await fs.readFile(logPath, "utf8");
+        progressPreview = text.trim().split(/\r?\n/).filter(Boolean).slice(-8);
+      } catch {
+        progressPreview = [];
+      }
+    } else {
+      progressPreview = await readJobLogTail(cwd, job.id, 8);
     }
-    const progressPreview = await readJobLogTail(cwd, job.id, 8);
     return summarizeJobForOutput(job, progressPreview);
   }
 
@@ -2815,6 +2860,10 @@ async function statusCommand(cwd, flags, positionals) {
   }
 
   lines.push(`running: ${payload.runningJobs.length}`);
+  const staleJobs = await listStaleJobsAnywhere();
+  if (staleJobs.length > 0) {
+    lines.push(`⚠ ${staleJobs.length} stale — reap: cc-delegate reap`);
+  }
   // Surface the agentic slot holder — a wedged slot used to be invisible.
   const slot = await readAgenticSlotHolder(CC_DELEGATE_HOME);
   if (slot && Number.isInteger(slot.pid)) {
@@ -2846,9 +2895,16 @@ async function statusCommand(cwd, flags, positionals) {
 
 async function resultCommand(cwd, flags, positionals) {
   const jobId = positionals[0];
-  const job = jobId
+  let job = jobId
     ? await findJob(cwd, jobId)
     : await findLatestFinishedJob(cwd);
+  if (!job && jobId) {
+    // Cross-workspace fallback
+    const resolved = await loadJobAnywhere(cwd, jobId);
+    if (resolved) {
+      job = resolved.job;
+    }
+  }
   if (!job) {
     throw new Error(
       jobId ? `job ${jobId} not found` : "no finished jobs found",
@@ -2945,6 +3001,72 @@ async function cancelCommand(cwd, positionals) {
   });
   await appendJobLog(cwd, jobId, "job cancelled by user");
   process.stdout.write(`${cancelled.id}\n`);
+}
+
+const REAP_HELP = [
+  "Reap stale jobs: dead-pid \"running\" or queued (no live pid, older than 10 min).",
+  "  Marks each terminal (status: failed) — only cancel handles live jobs.",
+  "  --dry-run  list what WOULD be reaped, change nothing.",
+  "  --json     emit JSON ({ reaped: [...] } or { wouldReap: [...] } for dry-run).",
+].join("\n");
+
+async function reapCommand(flags) {
+  if (flags.help) {
+    process.stdout.write(`${REAP_HELP}\n`);
+    return;
+  }
+  const staleJobs = await listStaleJobsAnywhere();
+
+  if (flags["dry-run"]) {
+    if (flags.json) {
+      printJson({
+        wouldReap: staleJobs.map((s) => ({ jobId: s.id, status: s.status, pid: s.pid, ageMs: s.ageMs })),
+        count: staleJobs.length,
+      });
+      return;
+    }
+    if (staleJobs.length === 0) {
+      process.stdout.write("no stale jobs\n");
+      return;
+    }
+    process.stdout.write(
+      `would reap ${staleJobs.length} stale job(s):\n${staleJobs.map((s) => `  ${s.id} ${s.status} pid=${s.pid} age=${Math.round(s.ageMs / 1000)}s`).join("\n")}\n`,
+    );
+    return;
+  }
+
+  if (staleJobs.length === 0) {
+    if (flags.json) {
+      printJson({ reaped: [], count: 0 });
+    } else {
+      process.stdout.write("no stale jobs\n");
+    }
+    return;
+  }
+
+  const reaped = [];
+  for (const s of staleJobs) {
+    try {
+      const result = await reapJobAtPath(s.jobPath);
+      if (!result.reaped) continue;
+      // Append log line in the same workspace
+      const logFile = s.jobPath.replace(/\.json$/, ".log");
+      const now = new Date().toISOString();
+      const line = `[${now}] reaped: stale (dead pid / abandoned)\n`;
+      await fs.appendFile(logFile, line, "utf8");
+      reaped.push({ jobId: s.id, status: s.status, pid: s.pid, ageMs: s.ageMs });
+    } catch {
+      // best-effort: skip unreadable/unwritable files
+    }
+  }
+
+  if (flags.json) {
+    printJson({ reaped, count: reaped.length });
+  } else {
+    process.stdout.write(
+      `reaped ${reaped.length} stale job(s): ${reaped.map((r) => r.jobId).join(" ")}\n`,
+    );
+  }
 }
 
 async function linkCommand() {
@@ -3274,12 +3396,32 @@ async function awaitCommand(cwd, flags, positionals) {
 
   // Watch a single job until terminal
   async function watchUntilTerminal(jobId) {
-    const workspace = await getWorkspaceState(cwd);
-    const jobPath = path.join(workspace.jobsDir, `${jobId}.json`);
-
+    // Fast path: current workspace
     let currentJob = await loadJob(cwd, jobId);
+    let jobPath;
+    let readJob; // function that returns the latest job (or null)
+
     if (!currentJob) {
-      throw new Error(`job ${jobId} not found`);
+      // Cross-workspace fallback — resolve via loadJobAnywhere
+      const resolved = await loadJobAnywhere(cwd, jobId);
+      if (!resolved) {
+        throw new Error(`job ${jobId} not found`);
+      }
+      currentJob = resolved.job;
+      jobPath = resolved.jobPath;
+      readJob = async () => {
+        try {
+          const text = await fs.readFile(jobPath, "utf8");
+          return JSON.parse(text);
+        } catch (error) {
+          if (error && error.code === "ENOENT") return null;
+          throw error;
+        }
+      };
+    } else {
+      const workspace = await getWorkspaceState(cwd);
+      jobPath = path.join(workspace.jobsDir, `${jobId}.json`);
+      readJob = () => loadJob(cwd, jobId);
     }
 
     // Already terminal?
@@ -3305,7 +3447,7 @@ async function awaitCommand(cwd, flags, positionals) {
 
       const checkJob = async () => {
         try {
-          const latest = await loadJob(cwd, jobId);
+          const latest = await readJob();
           if (latest && ["completed", "failed", "cancelled"].includes(latest.status)) {
             cleanup();
             resolve(latest);
@@ -3399,8 +3541,44 @@ async function watchCommand(cwd, flags, positionals) {
   const jobId = positionals[0];
   if (!jobId) throw new Error("watch requires a job id");
 
-  const job = await loadJob(cwd, jobId);
-  if (!job) throw new Error(`job ${jobId} not found`);
+  let job = await loadJob(cwd, jobId);
+  let jobPath;
+  let jobsDir;
+  let readJob; // function that returns the latest job (or null)
+  let readLogTailFn; // function that returns log lines (or [])
+
+  if (!job) {
+    // Cross-workspace fallback
+    const resolved = await loadJobAnywhere(cwd, jobId);
+    if (!resolved) throw new Error(`job ${jobId} not found`);
+    job = resolved.job;
+    jobPath = resolved.jobPath;
+    jobsDir = resolved.jobsDir;
+    readJob = async () => {
+      try {
+        const text = await fs.readFile(jobPath, "utf8");
+        return JSON.parse(text);
+      } catch (error) {
+        if (error && error.code === "ENOENT") return null;
+        throw error;
+      }
+    };
+    readLogTailFn = async (job) => {
+      const logPath = path.join(jobsDir, `${job.id}.log`);
+      try {
+        const text = await fs.readFile(logPath, "utf8");
+        return text.trim().split(/\r?\n/).filter(Boolean);
+      } catch {
+        return [];
+      }
+    };
+  } else {
+    const workspace = await getWorkspaceState(cwd);
+    jobPath = path.join(workspace.jobsDir, `${jobId}.json`);
+    jobsDir = workspace.jobsDir;
+    readJob = () => loadJob(cwd, jobId);
+    readLogTailFn = (j) => readJobLogTail(cwd, j.id, 100);
+  }
 
   if (["completed", "failed", "cancelled"].includes(job.status)) {
     // Already finished — print final activity and exit
@@ -3418,7 +3596,7 @@ async function watchCommand(cwd, flags, positionals) {
   };
 
   const activityPoll = async () => {
-    const current = await loadJob(cwd, jobId);
+    const current = await readJob();
     if (!current || ["completed", "failed", "cancelled"].includes(current.status)) {
       process.exit(0);
     }
@@ -3445,7 +3623,7 @@ async function watchCommand(cwd, flags, positionals) {
 
   const tailLogPoll = async (current) => {
     try {
-      const tailLines = await readJobLogTail(cwd, current.id, 100);
+      const tailLines = await readLogTailFn(current);
       if (tailLines.length > lastLogSize) {
         const newLines = tailLines.slice(lastLogSize);
         printLines(newLines);
@@ -4019,7 +4197,7 @@ async function main() {
 
   if (!command) {
     throw new Error(
-      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, await, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, jobs, watch, uninstall, link",
+      "subcommand required: setup, models, task, orchestrate, task-worker, status, result, cancel, await, usage, analysis, review, adversarial-review, gate, opencode, slot, reconcile, jobs, watch, uninstall, link, reap",
     );
   }
 
@@ -4075,6 +4253,9 @@ async function main() {
       return watchCommand(cwd, flags, positionals);
     case "link":
       await linkCommand();
+      return 0;
+    case "reap":
+      await reapCommand(flags);
       return 0;
     default:
       throw new Error(`unknown subcommand ${command}`);
