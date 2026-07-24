@@ -72,12 +72,13 @@ An orchestrator model (default `kimi-fast`) plans/decomposes; each task runs on 
 ### Collect & monitor
 
 | Command | Purpose | Key flags |
-|---|---|---|
+|---|---|---|---|
 | `status` | Show running jobs and recent history | `--all`, `--json` |
 | `await` | Block until job(s) reach terminal state, then print result | `--timeout <sec>`, `--json` |
 | `watch` | Stream live activity for a running job | (none) |
 | `jobs` | Browse all jobs; interactive panel with live detail | `--static`, `--json` |
 | `result` | Print the full output/saved result of a finished job | `--json` |
+| `reap` | Find stale (dead/abandoned) jobs across all workspaces and mark them terminal | `--dry-run`, `--json` |
 
 #### `status`
 
@@ -122,6 +123,27 @@ Interactive TUI panel (in a real terminal): ↑/↓ select job · enter to open 
 `cc-delegate result [<jobId>] [--json]`
 
 Prints the full output (model response text or error) of a finished job. With no `<jobId>`, prints the latest finished job. Includes context/quota/health advisory prefix and `--write` trust-gate annotations.
+
+#### `reap` — clean up zombie jobs
+
+`cc-delegate reap [--dry-run] [--json]`
+
+Scans **all workspaces** for stale jobs and marks them terminal (status `failed`, error `"reaped — worker process no longer alive"`), syncing each job's file and its workspace index.
+
+**Stale definition:** a job with status `running` whose pid is no longer alive, OR a job with status `queued` with no live pid older than 10 minutes (abandoned). These are dead/zombie jobs whose worker process died without cleaning up — leaving the record stuck as running/queued forever.
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | List what would be reaped without changing anything |
+| `--json` | Emit `{ reaped: [...], count }` (or `{ wouldReap: [...], count }` for dry-run) |
+
+**Example:**
+```
+cc-delegate reap --dry-run          # preview stale jobs
+cc-delegate reap --json             # reap and get machine-readable result
+```
+
+**Stale detection in `status` / `usage`:** When stale jobs exist (N > 0), `cc-delegate usage` summary and `cc-delegate status` show a `stale: N (dead pid / abandoned — reap: cc-delegate reap)` line. `cc-delegate usage --details` lists only pid-alive running jobs in the "in-flight" section; `usage --details --json` returns `{ entries, inFlight, stale }` (was a bare array of entries before this change).
 
 ---
 

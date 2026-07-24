@@ -246,6 +246,7 @@ cc-delegate opencode stop
 | `jobs` | Interactive panel: browse jobs, ↑/↓ select, enter to open one and watch it live (`--static` for a snapshot) |
 | `slot` | Inspect the agentic run slot; `--release` clears a wedged/stale lock (`--force` if the holder is still alive) |
 | `reconcile` | Cross-check ledger spend vs OpenRouter's own usage (`--set-baseline` for delta tracking); lists `unconfirmed` failed-but-maybe-billed rows |
+| `reap` | Find stale (dead/abandoned) jobs across all workspaces and mark them terminal (`--dry-run`, `--json`) |
 | `link` | Install the global `cc-delegate` / `cc-delegate-keys` wrappers |
 | `uninstall` | Stop the OpenCode server and remove wrappers (`--purge` also deletes data) |
 
@@ -274,6 +275,7 @@ When `enforce` is active, the Stop hook halts the turn until a passing review is
 - **Circuit‑breaker:** After each task the runtime checks (model, provider) health over the last 20 entries. A degraded pair prepends a `⚡ circuit‑breaker advisory` ending with the exact retry flags (`→ retry: --model X --provider Y`).
 - **Context guard:** Fails fast if the prompt clearly exceeds the model’s context window; warns at ≥70% usage with `⚠ context`.
 - **Live agentic progress:** `cc-delegate watch <job-id>` tails a running agentic job's tool activity (files read, commands run, edits).
+- **Stale job detection:** `cc-delegate usage` and `cc-delegate status` surface `stale: N (dead pid / abandoned — reap: cc-delegate reap)` when jobs are stuck as running/queued but their worker process is dead. `cc-delegate reap` finds these zombie jobs across all workspaces and marks them terminal; use `--dry-run` to preview, `--json` for machine-readable output.
 - **Jobs panel (see what a delegation is doing):** delegated jobs run through Bash, so Claude Code does not render them the way it renders its own subagents — without this you are blind to a running job. `cc-delegate jobs` opens an interactive panel: `↑`/`↓` select a job, **`enter` opens it** and streams its live log and tool activity, `←`/Esc goes back, `r` reloads, `q` quits. Where output is captured (inside Claude Code, or `/cc-delegate:jobs`) it prints a static snapshot of every job **plus the live detail of each running one** — costing the orchestrator no context. The ACTIVITY section fills in as OpenCode reports a turn's tool parts (only once that turn completes); the LOG section is the reliable second‑by‑second signal.
 - **Spend split:** The TUI’s Overview and `cc-delegate usage --details --json` report text‑vs‑agentic cost separately (`usage --details --mode agentic` shows the agentic table with agent, reasoning, cache and tool‑call columns).
 
