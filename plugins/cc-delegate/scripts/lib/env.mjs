@@ -7,13 +7,14 @@ const OLD_HOMES = [
   path.join(os.homedir(), ".claude", "frontier"),
   path.join(os.homedir(), ".claude", "delegate"),
 ];
-export const CC_DELEGATE_HOME = path.join(os.homedir(), ".claude", "cc-delegate");
+export const CC_DELEGATE_HOME = process.env.CC_DELEGATE_HOME || path.join(os.homedir(), ".claude", "cc-delegate");
 
 // One-shot migration: if an old data dir (frontier, then delegate) exists and the
 // new one doesn't yet, move it in place so existing usage/config/analysis history
-// survives the rename.
+// survives the rename. Only run for the DEFAULT home — skip when the caller
+// overrides CC_DELEGATE_HOME to prevent tests from accidentally moving real data.
 try {
-  if (!fsSync.existsSync(CC_DELEGATE_HOME)) {
+  if (!process.env.CC_DELEGATE_HOME && !fsSync.existsSync(CC_DELEGATE_HOME)) {
     const oldHome = OLD_HOMES.find((dir) => fsSync.existsSync(dir));
     if (oldHome) {
       fsSync.renameSync(oldHome, CC_DELEGATE_HOME);

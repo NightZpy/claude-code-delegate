@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { getWorkspaceState } from "./lib/state.mjs";
+// state.mjs reads CC_DELEGATE_HOME at import time, so it is loaded dynamically
+// AFTER we point that env var at an isolated temp home (see runTests).
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.join(__dirname, "companion.mjs");
@@ -103,6 +105,11 @@ async function addJobToIndex(cwd, jobsDir, jobId, jobData) {
 async function runTests() {
   console.log("🧪 Testing await command...\n");
   const tempDir = await fs.mkdtemp("/tmp/cc-delegate-test-");
+  // Isolate ALL job state under a temp home so synthetic fixtures never leak
+  // into the real ~/.claude/cc-delegate/state (child CLIs inherit this env).
+  const stateHome = await fs.mkdtemp(path.join(os.tmpdir(), "cc-delegate-state-"));
+  process.env.CC_DELEGATE_HOME = stateHome;
+  const { getWorkspaceState } = await import("./lib/state.mjs");
   console.log(`Using temp workspace: ${tempDir}`);
 
   try {
@@ -386,6 +393,7 @@ async function runTests() {
     // Cleanup
     try {
       await fs.rm(tempDir, { recursive: true });
+      await fs.rm(stateHome, { recursive: true, force: true });
       console.log(`\nCleaned up temp workspace`);
     } catch {}
   }

@@ -38,7 +38,10 @@ export async function resolveWorkspaceRoot(cwd) {
 
 // The plugin's own home — the SAME path whether the runtime is invoked from
 // Claude Code or from the user's terminal.
-const CC_DELEGATE_STATE_HOME = path.join(os.homedir(), ".claude", "cc-delegate", "state");
+const CC_DELEGATE_STATE_HOME = path.join(
+  process.env.CC_DELEGATE_HOME || path.join(os.homedir(), ".claude", "cc-delegate"),
+  "state",
+);
 
 export async function getWorkspaceState(cwd) {
   const workspaceRoot = await resolveWorkspaceRoot(cwd);
@@ -312,4 +315,255 @@ export async function findLatestFinishedJob(cwd) {
     return null;
   }
   return loadJob(cwd, latest.id);
+}
+
+/**
+ * Look up a job by id across ALL workspaces. Returns the first hit with
+ * its resolved {@link jobsDir} and {@link jobPath}. Read-only — never
+ * writes or moves files.
+ *
+ * Fast path: checks the current workspace first.
+ * Fallback: scans sibling workspace dirs under CC_DELEGATE_STATE_HOME.
+ *
+ * @param {string} cwd - used to identify the "current" workspace
+ * @param {string} jobId
+ * @returns {Promise<{job: object, jobsDir: string, jobPath: string} | null>}
+ */
+export async function loadJobAnywhere(cwd, jobId) {
+  // Basic traversal guard — reject paths that try to escape the jobs dir
+  if (/[\/\\]/.test(jobId) || jobId.includes("..")) {
+    return null;
+  }
+  // Fast path: current workspace
+  const currentJob = await loadJob(cwd, jobId);
+  if (currentJob) {
+    const workspace = await getWorkspaceState(cwd);
+    return {
+      job: currentJob,
+      jobsDir: workspace.jobsDir,
+      jobPath: path.join(workspace.jobsDir, `${jobId}.json`),
+    };
+  }
+
+  // Resolve the current workspace dir name so we can skip it
+  let currentDirName;
+  try {
+    const ws = await getWorkspaceState(cwd);
+    currentDirName = path.basename(ws.workspaceDir);
+  } catch {
+    currentDirName = null;
+  }
+
+  // Scan sibling workspace dirs
+  let entries;
+  try {
+    entries = await fs.readdir(CC_DELEGATE_STATE_HOME, { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (currentDirName && entry.name === currentDirName) continue;
+
+    const candidatePath = path.join(CC_DELEGATE_STATE_HOME, entry.name, "jobs", `${jobId}.json`);
+    const job = await readJson(candidatePath, null);
+    if (job) {
+      return {
+        job,
+        jobsDir: path.join(CC_DELEGATE_STATE_HOME, entry.name, "jobs"),
+        jobPath: candidatePath,
+      };
+    }
+  }
+
+  return null;
+}
+
+// Is a pid actually alive? kill(pid,0) throws ESRCH if the process is gone,
+// EPERM if it exists but we can't signal it (still alive).
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+const STALE_QUEUED_AGE_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Scan job files under a workspace's jobs dir. Returns job objects
+ * augmented with jobPath and computed elapsedMs / ageMs.
+ */
+async function scanWorkspaceJobs(stateHome, entryName) {
+  const jobsDir = path.join(stateHome, entryName, "jobs");
+  let jobFiles;
+  try {
+    jobFiles = await fs.readdir(jobsDir);
+  } catch {
+    return [];
+  }
+
+  const reads = jobFiles
+    .filter((file) => file.endsWith(".json"))
+    .map(async (file) => {
+      try {
+        const job = await readJson(path.join(jobsDir, file), null);
+        if (!job) return null;
+        if (job.status !== "running" && job.status !== "queued") return null;
+        const createdAtMs = Date.parse(job.createdAt);
+        const ageMs = Number.isFinite(createdAtMs) ? Math.max(0, Date.now() - createdAtMs) : 0;
+        return { ...job, ageMs, elapsedMs: ageMs, jobPath: path.join(jobsDir, file) };
+      } catch {
+        return null;
+      }
+    });
+
+  return (await Promise.all(reads)).filter(Boolean);
+}
+
+function classifyJob(job) {
+  const { status, pid, ageMs } = job;
+  if (status === "running") {
+    return pidAlive(pid) ? "LIVE" : "STALE";
+  }
+  // status === "queued"
+  if (pidAlive(pid)) return "LIVE"; // queued but already spawned with a live pid
+  if (ageMs < STALE_QUEUED_AGE_MS) return "LIVE"; // legitimately pending
+  return "STALE";
+}
+
+/**
+ * Single-pass classifier: scans every workspace under CC_DELEGATE_STATE_HOME
+ * once and splits jobs into LIVE and STALE. The two public exports
+ * ({@link listRunningJobsAnywhere}, {@link listStaleJobsAnywhere}) delegate
+ * to this so callers that need both avoid a double sweep.
+ *
+ * @returns {Promise<{ running: Array<object>, stale: Array<object> }>}
+ */
+export async function scanAndClassifyAllWorkspaces() {
+  let entries;
+  try {
+    entries = await fs.readdir(CC_DELEGATE_STATE_HOME, { withFileTypes: true });
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return { running: [], stale: [] };
+    }
+    throw error;
+  }
+
+  const scans = [];
+  const running = [];
+  const stale = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    scans.push(
+      scanWorkspaceJobs(CC_DELEGATE_STATE_HOME, entry.name).then((jobs) => {
+        for (const job of jobs) {
+          if (classifyJob(job) === "LIVE") {
+            running.push(job);
+          } else {
+            stale.push({
+              id: job.id,
+              model: job.model,
+              mode: job.mode || null,
+              ageMs: job.ageMs,
+              elapsedMs: job.elapsedMs,
+              pid: job.pid,
+              status: job.status,
+              jobPath: job.jobPath,
+            });
+          }
+        }
+      }),
+    );
+  }
+  await Promise.all(scans);
+
+  running.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  stale.sort((a, b) => b.ageMs - a.ageMs);
+  return { running: running.slice(0, 50), stale };
+}
+
+/**
+ * List LIVE running/queued jobs across ALL workspaces. Returns up to 50 jobs,
+ * sorted by createdAt descending. Each job includes a computed
+ * {@code elapsedMs} field. Best-effort — skips unreadable files silently.
+ *
+ * @returns {Promise<Array<object>>}
+ */
+export async function listRunningJobsAnywhere() {
+  const { running } = await scanAndClassifyAllWorkspaces();
+  return running;
+}
+
+/**
+ * List STALE jobs across all workspaces — jobs that appear running/queued but
+ * whose worker process is dead (or queued with no live pid older than the
+ * threshold). Each entry includes id, model, mode, ageMs/elapsedMs, pid,
+ * status, and workspace jobPath so that {@link reapCommand} can rewrite them.
+ *
+ * @returns {Promise<Array<object>>}
+ */
+export async function listStaleJobsAnywhere() {
+  const { stale } = await scanAndClassifyAllWorkspaces();
+  return stale;
+}
+
+/**
+ * Reap a single job at the given jobPath. Writes the job file AND updates
+ * its workspace index. Guards against clobbering a concurrent transition:
+ * skips the write if the job is no longer stale (terminal status or live pid).
+ *
+ * @param {string} jobPath - absolute path to <id>.json
+ * @returns {Promise<{ reaped: boolean, reason?: string, job?: object }>}
+ */
+export async function reapJobAtPath(jobPath) {
+  const workspaceDir = path.dirname(path.dirname(jobPath));
+  const indexFile = path.join(workspaceDir, "state.json");
+
+  // Re-read current job to guard against concurrent transitions
+  const current = await readJson(jobPath, null);
+  if (!current) {
+    return { reaped: false, reason: "job file not found" };
+  }
+
+  // FIX 2: only reap if STILL stale — skip if terminal or pid is now alive
+  const isTerminal = ["completed", "failed", "cancelled"].includes(current.status);
+  if (isTerminal) {
+    return { reaped: false, reason: "no longer stale" };
+  }
+  if (current.status === "running" && pidAlive(current.pid)) {
+    return { reaped: false, reason: "no longer stale" };
+  }
+  if (current.status === "queued" && pidAlive(current.pid)) {
+    return { reaped: false, reason: "no longer stale" };
+  }
+  // queued with dead pid is still stale (check against the age was done at scan time)
+
+  const now = new Date().toISOString();
+  const next = {
+    ...current,
+    status: "failed",
+    pid: null,
+    error: "reaped — worker process no longer alive",
+    updatedAt: now,
+  };
+  if (!next.completedAt) next.completedAt = now;
+
+  // Write job file
+  await writeJson(jobPath, next);
+
+  // Update workspace index
+  const index = await readJson(indexFile, { owner: OWNER, version: INDEX_VERSION, jobs: [] });
+  index.jobs = [summarizeJob(next), ...index.jobs.filter((entry) => entry.id !== next.id)];
+  await writeJson(indexFile, index);
+
+  return { reaped: true, job: next };
 }
